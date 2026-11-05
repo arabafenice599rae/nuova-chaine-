@@ -27,8 +27,8 @@ check "servizi attivi" bash -c 'systemctl is-active centrifuga && systemctl is-a
 check "HTTPS /health" bash -c "curl -sf --cacert $CA https://$DOMAIN/health"
 check "HTTPS getVersion" rpc getVersion
 check "permessi chiavi" perms
-check "web3.js (HTTPS + WebSocket)" bash -c "cd $ROOT/tests/web3 && node rpc.mjs https://$DOMAIN $BENCH | tail -3"
-check "stream /stream" node "$ROOT/tests/web3/stream-check.mjs" "wss://$DOMAIN/stream"
+check "web3.js (HTTPS + WebSocket)" bash -c "cd $ROOT/tests/web3 && timeout 180 node rpc.mjs https://$DOMAIN $BENCH | tail -3"
+check "stream /stream" timeout 60 node "$ROOT/tests/web3/stream-check.mjs" "wss://$DOMAIN/stream"
 
 H1=$(height); K1=$(keyhash); G1=$(rpc getGenesisHash)
 check "riavvio del servizio" bash -c "systemctl restart centrifuga && sleep 1 && for i in \$(seq 30); do curl -sf --cacert $CA https://$DOMAIN/health >/dev/null && exit 0; sleep 1; done; exit 1"
@@ -40,13 +40,13 @@ wait_health
 check "chiavi invariate dopo la riesecuzione" test "$(keyhash)" = "$K1"
 check "genesis invariato dopo la riesecuzione" test "$(rpc getGenesisHash)" = "$G1"
 
-BENCHPK=$(cd "$ROOT/tests/web3" && node -e "const w=require('@solana/web3.js');console.log(w.Keypair.fromSecretKey(Uint8Array.from(require(process.argv[1]))).publicKey.toBase58())" "$BENCH")
+BENCHPK=$(cd "$ROOT/tests/web3" && timeout 30 node -e "const w=require('@solana/web3.js');console.log(w.Keypair.fromSecretKey(Uint8Array.from(require(process.argv[1]))).publicKey.toBase58())" "$BENCH")
 check "--reset" bash -c "$ROOT/deploy/devnet-install.sh --domain $DOMAIN --email ci@example.invalid --tls-internal --reset --prefund $BENCHPK:50 > $OUT/install-reset.log 2>&1"
 wait_health
 check "chiavi invariate dopo --reset" test "$(keyhash)" = "$K1"
 check "nuovo genesis dopo --reset" test "$(rpc getGenesisHash)" != "$G1"
 check "permessi chiavi dopo --reset" perms
-check "web3.js dopo --reset" bash -c "cd $ROOT/tests/web3 && node rpc.mjs https://$DOMAIN $BENCH | tail -1"
+check "web3.js dopo --reset" bash -c "cd $ROOT/tests/web3 && timeout 180 node rpc.mjs https://$DOMAIN $BENCH | tail -1"
 
 # Le chiavi private non devono comparire in nessun log.
 journalctl -u centrifuga -u caddy --no-pager > "$OUT/journal.log" 2>&1
