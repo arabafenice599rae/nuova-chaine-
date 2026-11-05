@@ -3,8 +3,6 @@
 [node]
 token_name = "CENTRIFUGA"
 token_symbol = "CnFA"           # forma canonica: non normalizzare maiuscole/minuscole
-slot_ms = 100
-heartbeat_slots = 10            # senza tx: un blocco al secondo; l'altezza è lo slot
 data_dir = "data"
 operator_keypair = "operator.json"  # formato solana-keygen (array JSON di 64 byte)
 snapshot_every = 3000           # blocchi (5 minuti a 100 ms)
@@ -21,6 +19,8 @@ ingress_pending_per_payer = 64
 network = "mainnet"             # "devnet" per ammettere [[genesis.prefund]]
 timestamp_ms = 1798761600000    # 2027-01-01T00:00:00Z
 operator = "SOSTITUIRE_CON_PUBKEY_OPERATORE"
+slot_ms = 100                   # regola: timestamp - precedente >= salto × slot_ms / 2
+heartbeat_slots = 10            # salto massimo di altezza; senza tx, un blocco al secondo
 lamports_per_signature = 5000
 blockhash_window = 300          # N: validità di un blockhash in blocchi
 airdrop_cnfa = 20000000         # 100 CnFA a testa ai primi 200.000 aventi diritto

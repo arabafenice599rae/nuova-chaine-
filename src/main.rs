@@ -35,7 +35,7 @@ fn cmd_genesis(path: &Path) -> Result<(), String> {
     }
     println!("riserva netta: {}", fmt_amount(s.reserve_lamports, sym));
     println!("conservazione: OK (somma = {})", fmt_amount(chain.total_lamports() as u64, sym));
-    let h = genesis::check_determinism(&cfg.genesis, 20, cfg.node.slot_ms)?;
+    let h = genesis::check_determinism(&cfg.genesis, 20)?;
     println!("determinismo: OK (20 blocchi di test, hash finale {h})");
     println!("genesis hash: {}", chain.genesis_hash);
     Ok(())

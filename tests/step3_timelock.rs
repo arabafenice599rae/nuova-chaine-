@@ -59,10 +59,14 @@ impl T {
             self.c.produce(vec![], self.t, &self.op);
         }
     }
-    /// Salta gli slot vuoti: il prossimo blocco sarà all'altezza `height`.
+    /// Blocchi vuoti a salti di 10 (il massimo con heartbeat_slots = 10): il prossimo
+    /// blocco sarà all'altezza `height`. Le altezze intermedie non hanno un blocco.
     fn jump(&mut self, height: u64) {
-        self.t += 100;
-        self.c.produce_at(height - 1, vec![], self.t, &self.op);
+        while self.c.height + 1 < height {
+            self.t += 1_000;
+            let next = (self.c.height + 10).min(height - 1);
+            self.c.produce_at(next, vec![], self.t, &self.op);
+        }
     }
     fn bal(&self, k: &Address) -> u64 {
         self.c.svm.lamports(k)
@@ -241,7 +245,7 @@ fn reserve_unlock_crossed_by_height_jump() {
     let wave = t.wave("reserve", five, 8, &op).unwrap(); // altezza 1
     let x = Address::new_unique();
     assert_err(t.claim("reserve", wave, x, five, 0, &op, x), 4); // altezza 2 < 10
-    t.jump(10_000); // ben oltre lo sblocco, senza passare per l'altezza 10
+    t.jump(15); // salti 2 -> 12 -> 14: l'altezza 10 (sblocco) non ha un blocco
     t.claim("reserve", wave, x, five, 0, &op, x).unwrap();
     assert_eq!(t.bal(&x), five);
     // Airdrop: un claim prima della scadenza riesce anche dopo un salto che resta sotto.

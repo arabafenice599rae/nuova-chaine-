@@ -34,17 +34,26 @@ Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra pro
 
 ## Blocchi
 
-- Slot ogni 100 ms (`slot_ms`); **altezza di un blocco = numero del suo slot**
-  dal timestamp del genesis, quindi le altezze misurano il tempo reale (sblocchi dei
-  vault, fee mining, scadenze), anche dopo un fermo del nodo.
-- Un blocco esce solo se ci sono transazioni in coda, oppure ogni `heartbeat_slots`
-  slot (default 10 = 1 s) come segnale di presenza: tra due blocchi le altezze possono
-  saltare. Un blocco vuoto occupa 152 byte: con l'heartbeat a 1 s il journal cresce di
-  ~13 MB al giorno senza traffico (contro ~130 MB con un blocco a ogni slot).
+- Slot ogni 100 ms (`slot_ms`). Un blocco esce solo se ci sono transazioni in coda,
+  oppure ogni `heartbeat_slots` slot (default 10 = 1 s) come segnale di presenza.
+- **Regole di validità** (parametri del genesis, inclusi nel suo hash), controllate da
+  `Chain::apply`, dalla riesecuzione del journal e da `stream::Replica`:
+  - salto = altezza − altezza precedente, con **1 ≤ salto ≤ `heartbeat_slots`**;
+  - **timestamp − precedente ≥ salto × `slot_ms` / 2** (e almeno 1 ms);
+  - la replica in tempo reale rifiuta anche i timestamp oltre 5 s nel suo futuro.
+- Il produttore usa come salto gli slot trascorsi dall'ultimo blocco (al massimo
+  `heartbeat_slots`) e come timestamp max(ora, precedente + salto × slot_ms / 2,
+  precedente + 1). Dopo un riavvio riparte da ultima altezza + 1: il tempo di fermo non
+  viene recuperato, quindi l'altezza misura il tempo di attività della chain.
+- Un blocco vuoto occupa 152 byte: con l'heartbeat a 1 s il journal cresce di ~13 MB
+  al giorno senza traffico (contro ~130 MB con un blocco a ogni slot).
 - Header: altezza, hash precedente, timestamp (ms, monotono:
   `max(ora, precedente + 1)`), hash di stato, firma dell'operatore. Corpo: le tx
   nell'ordine eseguito.
 - A ogni blocco la sysvar Clock riceve `slot = altezza` e `unix_timestamp`.
+- Genesis hash: il blocco 0 ha come `prev_hash` lo SHA-256 dei parametri di consenso
+  (operatore, fee, finestra, fee mining, `slot_ms`, `heartbeat_slots`, vault): chi
+  verifica con parametri diversi ottiene un altro genesis.
 - Hash di stato: SHA-256 su tutti gli account ordinati per pubkey (dietro
   l'interfaccia `StateHasher`, sostituibile da un hasher incrementale).
 - Blockhash = hash del blocco. Il blockhash del blocco all'altezza h vale nei blocchi

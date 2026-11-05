@@ -37,6 +37,53 @@ pub struct Params {
     /// Da questa altezza (o a vault "mining" vuoto) il fee mining finisce.
     pub mining_end_height: u64,
     pub vaults: Vaults,
+    pub rules: Rules,
+}
+
+/// Regole di validità dell'header tra un blocco e il successivo (parte del genesis).
+#[derive(Clone, Copy, Debug)]
+pub struct Rules {
+    pub slot_ms: u64,
+    /// Salto massimo di altezza tra due blocchi (e cadenza dell'heartbeat).
+    pub heartbeat_slots: u64,
+}
+
+impl Rules {
+    /// Timestamp minimo per un blocco `gap` slot dopo il precedente.
+    pub fn min_timestamp(&self, prev_ts: u64, gap: u64) -> u64 {
+        prev_ts + (gap * self.slot_ms / 2).max(1)
+    }
+
+    /// 1 <= gap <= heartbeat_slots e timestamp - precedente >= gap * slot_ms / 2.
+    pub fn check(&self, prev_height: u64, prev_ts: u64, h: &Header) -> Result<(), String> {
+        let gap = h.height.checked_sub(prev_height).filter(|g| (1..=self.heartbeat_slots).contains(g));
+        let Some(gap) = gap else {
+            return Err(format!("blocco {}: salto di altezza da {prev_height} fuori da 1..={}", h.height, self.heartbeat_slots));
+        };
+        if h.timestamp_ms < self.min_timestamp(prev_ts, gap) {
+            return Err(format!("blocco {}: timestamp {} troppo vicino al precedente {prev_ts} (salto {gap})", h.height, h.timestamp_ms));
+        }
+        Ok(())
+    }
+}
+
+impl Params {
+    /// Hash dei parametri di consenso: entra nel genesis hash (prev_hash del blocco 0).
+    pub fn hash(&self) -> Hash {
+        use sha2::{Digest, Sha256};
+        let mut d = Sha256::new();
+        d.update(self.operator.as_ref());
+        for x in [
+            self.lamports_per_signature, self.blockhash_window as u64, self.block_budget, self.halving_blocks,
+            self.mining_end_height, self.rules.slot_ms, self.rules.heartbeat_slots,
+        ] {
+            d.update(x.to_le_bytes());
+        }
+        for v in [&self.vaults.mining, &self.vaults.airdrop, &self.vaults.reserve] {
+            d.update(v.as_ref());
+        }
+        Hash::new_from_array(d.finalize().into())
+    }
 }
 
 /// Vault che il nodo muove direttamente (regole di fee nel nodo).
@@ -127,11 +174,12 @@ impl Chain {
 
     /// Stato di genesis: il "blocco 0" non è firmato e non sta nel journal.
     pub fn genesis(svm: Svm, params: Params, timestamp_ms: u64) -> Chain {
+        let params_hash = params.hash();
         let mut c = Chain::new(svm, params, 0, Hash::default(), timestamp_ms, Hash::default());
         let g = Block {
             header: Header {
                 height: 0,
-                prev_hash: Hash::default(),
+                prev_hash: params_hash,
                 timestamp_ms,
                 state_hash: c.state_hash(&BTreeSet::new()),
                 signature: Signature::default(),
@@ -170,13 +218,29 @@ impl Chain {
         }
     }
 
-    /// Registra un blocco già incluso nello snapshot (solo finestra, nessuna esecuzione).
-    pub fn note_block(&mut self, b: &Block) {
+    /// Registra un blocco già incluso nello snapshot: nessuna esecuzione, ma
+    /// concatenamento, regole dell'header e firma sono verificati come in `apply`.
+    pub fn note_block(&mut self, b: &Block) -> Result<(), String> {
+        self.check_header(b)?;
         self.height = b.header.height;
         self.last_ts = b.header.timestamp_ms;
         self.last_hash = b.hash();
         self.push_window(self.height, self.last_hash, b.txs.iter().map(|t| t.signatures[0]).collect());
         self.expire(self.height + 1);
+        Ok(())
+    }
+
+    /// Concatenamento, regole di altezza e timestamp, firma dell'operatore.
+    fn check_header(&self, b: &Block) -> Result<(), String> {
+        let h = &b.header;
+        if h.prev_hash != self.last_hash {
+            return Err(format!("blocco {}: header non concatenato", h.height));
+        }
+        self.params.rules.check(self.height, self.last_ts, h)?;
+        if !b.verify_signature(&self.params.operator) {
+            return Err(format!("blocco {}: firma operatore invalida", h.height));
+        }
+        Ok(())
     }
 
     /// Controlli del nodo prima dell'esecuzione: duplicati, blockhash, durable nonce.
@@ -368,10 +432,12 @@ impl Chain {
         self.produce_at(self.height + 1, txs, now_ms, kp)
     }
 
-    /// Operatore: blocco all'altezza (= slot) `height`, che può saltare slot vuoti.
+    /// Operatore: blocco all'altezza `height` (salto di 1..=heartbeat_slots slot).
+    /// Timestamp = max(ora, precedente + salto × slot_ms / 2, precedente + 1).
     pub fn produce_at(&mut self, height: u64, txs: Vec<VersionedTransaction>, now_ms: u64, kp: &Keypair) -> Executed {
-        assert!(height > self.height, "altezza non crescente");
-        let ts = now_ms.max(self.last_ts + 1);
+        let gap = height.saturating_sub(self.height);
+        assert!((1..=self.params.rules.heartbeat_slots).contains(&gap), "salto di altezza {gap} fuori dalle regole");
+        let ts = now_ms.max(self.params.rules.min_timestamp(self.last_ts, gap));
         let mut ex = self.run(height, ts, txs, false).expect("produzione non strict");
         ex.block.sign(kp);
         self.finish(&ex);
@@ -381,13 +447,7 @@ impl Chain {
     /// Chiunque: riesegue un blocco firmato e verifica header e hash di stato.
     pub fn apply(&mut self, b: &Block) -> Result<Executed, String> {
         let h = &b.header;
-        // L'altezza è lo slot: può saltare gli slot vuoti, ma cresce sempre.
-        if h.height <= self.height || h.prev_hash != self.last_hash || h.timestamp_ms <= self.last_ts {
-            return Err(format!("blocco {}: header non concatenato", h.height));
-        }
-        if !b.verify_signature(&self.params.operator) {
-            return Err(format!("blocco {}: firma operatore invalida", h.height));
-        }
+        self.check_header(b)?;
         let valid = crate::ingress::verify_signatures(&b.txs);
         if valid.iter().any(|ok| !ok) {
             return Err(format!("blocco {}: firma tx invalida", h.height));

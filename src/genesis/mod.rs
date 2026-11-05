@@ -13,7 +13,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
 use crate::exec::litesvm_internal::Svm;
-use crate::exec::{Chain, Params, Vaults};
+use crate::exec::{Chain, Params, Rules, Vaults};
 
 pub const LAMPORTS_PER_CNFA: u64 = 1_000_000_000;
 pub const SUPPLY_LAMPORTS: u64 = 100_000_000 * LAMPORTS_PER_CNFA;
@@ -59,9 +59,6 @@ pub struct Config {
 pub struct NodeConfig {
     pub token_name: String,
     pub token_symbol: String,
-    pub slot_ms: u64,
-    /// Senza transazioni, un blocco ogni `heartbeat_slots` slot (presenza e tempo).
-    pub heartbeat_slots: u64,
     pub data_dir: PathBuf,
     pub operator_keypair: PathBuf,
     pub snapshot_every: u64,
@@ -88,6 +85,10 @@ pub struct GenesisConfig {
     pub network: String,
     pub timestamp_ms: u64,
     pub operator: String,
+    /// Durata di uno slot. Regola: timestamp - precedente >= salto × slot_ms / 2.
+    pub slot_ms: u64,
+    /// Salto massimo di altezza tra due blocchi; senza tx, un blocco ogni heartbeat_slots slot.
+    pub heartbeat_slots: u64,
     pub lamports_per_signature: u64,
     pub blockhash_window: usize,
     /// Vault "airdrop": claim degli aventi diritto (e residuo del fee mining).
@@ -142,6 +143,7 @@ impl GenesisConfig {
                 airdrop: vault_address("airdrop"),
                 reserve: vault_address("reserve"),
             },
+            rules: Rules { slot_ms: self.slot_ms, heartbeat_slots: self.heartbeat_slots },
         })
     }
 }
@@ -159,6 +161,9 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
         "mainnet" if g.prefund.is_empty() => {}
         "mainnet" => return Err("prefund ammesso solo con network = \"devnet\"".into()),
         n => return Err(format!("network sconosciuta: {n} (mainnet | devnet)")),
+    }
+    if g.slot_ms < 2 || g.heartbeat_slots == 0 {
+        return Err("servono slot_ms >= 2 e heartbeat_slots >= 1".into());
     }
     if g.claims_end_height < g.fee_mining_end_height {
         return Err("claims_end_height deve seguire fee_mining_end_height".into());
@@ -209,7 +214,7 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
 
 /// Determinismo: costruisce due volte il genesis (più un conto di test), produce
 /// `n` blocchi con trasferimenti sul primo, li riesegue sul secondo e confronta.
-pub fn check_determinism(g: &GenesisConfig, n: u64, slot_ms: u64) -> Result<Hash, String> {
+pub fn check_determinism(g: &GenesisConfig, n: u64) -> Result<Hash, String> {
     let op = Keypair::new();
     let payer = Keypair::new_from_array([7; 32]);
     let mut g = g.clone();
@@ -225,7 +230,7 @@ pub fn check_determinism(g: &GenesisConfig, n: u64, slot_ms: u64) -> Result<Hash
     for i in 1..=n {
         let to = Address::new_from_array([i as u8; 32]);
         let tx = transfer_tx(&payer, &to, 1_000_000 + i, a.last_hash);
-        let ex = a.produce(vec![tx], g.timestamp_ms + i * slot_ms, &op);
+        let ex = a.produce(vec![tx], g.timestamp_ms + i * g.slot_ms, &op);
         let ey = b.apply(&ex.block)?;
         if ey.block.hash() != ex.block.hash() {
             return Err(format!("blocco {i}: hash diverso"));

@@ -70,6 +70,11 @@ fn snapshot(n: &Node, keys: impl IntoIterator<Item = Address>) -> Accounts {
     keys.into_iter().map(|k| (k, n.chain.svm.get(&k).cloned())).collect()
 }
 
+/// Messaggio "solo header e corpo" (come nel recupero dal journal).
+pub fn header_message(b: &Block) -> String {
+    block_json(b, None).to_string()
+}
+
 /// Messaggio live per un blocco appena prodotto (sul thread del nodo).
 pub fn block_message(n: &Node, ex: &Executed) -> String {
     block_json(&ex.block, Some(&snapshot(n, ex.changed.iter().copied()))).to_string()
@@ -202,6 +207,11 @@ pub struct Replica {
     last_state: Hash,
     /// Nuova ancora non contigua (recupero oltre la finestra): serve uno stato completo.
     needs_full: bool,
+    last_ts: u64,
+    /// Regole di altezza e timestamp del genesis.
+    pub rules: crate::exec::Rules,
+    /// In tempo reale: rifiuta timestamp oltre questo margine nel futuro (None = storico).
+    pub max_future_ms: Option<u64>,
     pub accounts: HashMap<Address, AccountSharedData>,
 }
 
@@ -218,8 +228,19 @@ fn decode64(s: &str) -> Result<Vec<u8>, String> {
 }
 
 impl Replica {
-    pub fn new(operator: Address) -> Replica {
-        Replica { operator, height: 0, last_hash: Hash::default(), last_state: Hash::default(), needs_full: false, accounts: HashMap::new() }
+    /// Replica in tempo reale: rifiuta i blocchi con timestamp oltre 5 s nel futuro.
+    pub fn new(operator: Address, rules: crate::exec::Rules) -> Replica {
+        Replica {
+            operator,
+            height: 0,
+            last_hash: Hash::default(),
+            last_state: Hash::default(),
+            needs_full: false,
+            last_ts: 0,
+            rules,
+            max_future_ms: Some(5_000),
+            accounts: HashMap::new(),
+        }
     }
 
     pub fn state_hash(&self) -> Hash {
@@ -272,18 +293,26 @@ impl Replica {
                 if !block.verify_signature(&self.operator) {
                     return Err(format!("blocco {}: firma non valida", block.header.height));
                 }
-                // Un blocco solo header non contiguo è una nuova ancora (firmata
-                // dall'operatore): vale solo se segue uno stato completo.
+                let h = &block.header;
+                if let Some(max) = self.max_future_ms {
+                    if h.timestamp_ms > crate::node::now_ms() + max {
+                        return Err(format!("blocco {}: timestamp nel futuro", h.height));
+                    }
+                }
+                // Blocco concatenato (stesso prev_hash): valgono le regole di altezza e
+                // timestamp. Un blocco solo header con prev_hash diverso è una nuova ancora
+                // (recupero oltre la finestra): vale solo se segue uno stato completo.
                 let accounts = field(&v, "accounts")?;
                 let anchored = self.height > 0 || self.last_hash != Hash::default();
-                // L'altezza è lo slot: può saltare, ma cresce e punta all'ultimo blocco.
-                let contiguous = block.header.height > self.height && block.header.prev_hash == self.last_hash;
-                if anchored && !contiguous {
-                    if !accounts.is_null() || block.header.height <= self.height {
-                        return Err(format!("blocco {}: non concatenato a {}", block.header.height, self.height));
+                if anchored && h.prev_hash == self.last_hash {
+                    self.rules.check(self.height, self.last_ts, h)?;
+                } else if anchored {
+                    if !accounts.is_null() || h.height <= self.height {
+                        return Err(format!("blocco {}: non concatenato a {}", h.height, self.height));
                     }
                     self.needs_full = true;
                 }
+                self.last_ts = h.timestamp_ms;
                 if self.needs_full && !accounts.is_null() {
                     return Err("delta ricevuto prima dello stato completo".into());
                 }

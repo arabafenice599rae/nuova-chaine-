@@ -11,8 +11,8 @@ use solana_signer::Signer;
 
 const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 const DAY: u64 = 86_400_000;
-/// L'altezza è lo slot reale (100 ms): la fine del fee mining cade dopo i 6 giorni simulati.
-const END: u64 = 6 * 864_000 + 50;
+/// Fine del fee mining dopo i 6 giorni simulati (2 blocchi al giorno, salto massimo 10).
+const END: u64 = 200;
 
 /// Ogni voce: (chi, in lista airdrop, tx riuscite, giorni distinti).
 #[test]

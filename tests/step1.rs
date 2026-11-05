@@ -54,7 +54,7 @@ fn genesis_conservation_and_programs() {
     assert_eq!(c.svm.lamports(&genesis::vault_address("mining")) - rent, 30_000_000 * LAMPORTS_PER_CNFA);
     // Determinismo: due costruzioni, stesso hash.
     assert_eq!(chain(&cfg).genesis_hash, c.genesis_hash);
-    genesis::check_determinism(&cfg.genesis, 5, 100).unwrap();
+    genesis::check_determinism(&cfg.genesis, 5).unwrap();
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn transfer_signed_block_and_replay() {
     let stale = transfer_tx(&payer, &to, 1, solana_hash::Hash::new_from_array([9; 32]));
     let ex2 = a.produce(vec![tx, stale], t0 + 100, &op);
     assert!(ex2.block.txs.is_empty());
-    assert_eq!(ex2.block.header.timestamp_ms, t0 + 101, "timestamp monotono");
+    assert_eq!(ex2.block.header.timestamp_ms, t0 + 150, "timestamp >= precedente + salto × slot_ms / 2");
 
     // Replica: rieseguire i blocchi dà lo stesso stato; un blocco alterato è rifiutato.
     let mut b = chain(&cfg);
