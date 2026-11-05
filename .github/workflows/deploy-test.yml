@@ -39,6 +39,7 @@ jobs:
       - name: latenza (stessa macchina, via Caddy e TLS)
         working-directory: tests/web3
         run: |
+          set -o pipefail
           sudo cp /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/ca.crt"
           sudo chmod 644 "$RUNNER_TEMP/ca.crt"
           {
