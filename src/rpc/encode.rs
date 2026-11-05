@@ -118,7 +118,7 @@ pub fn account(svm: &Svm, a: &AccountSharedData, enc: Option<&str>, slice: Optio
         Some("base58") => json!([b58(d), "base58"]),
         Some("base64") => json!([b64(d), "base64"]),
         Some("jsonParsed") => parsed(svm, a).unwrap_or_else(|| json!([b64(d), "base64"])),
-        Some(e) => return Err(format!("codifica non supportata: {e}")),
+        Some(e) => return Err(format!("unsupported encoding: {e}")),
     };
     Ok(json!({
         "lamports": a.lamports(), "owner": a.owner().to_string(), "data": data,

@@ -104,5 +104,5 @@ Sul VPS:
 
 ```sh
 cut -d' ' -f2- /var/lib/centrifuga/data/rpc.log | sort | uniq -c | sort -rn   # metodi ricevuti, con esito
-grep NON_SUPPORTATO /var/lib/centrifuga/data/rpc.log | cut -d' ' -f2,3 | sort -u
+grep UNSUPPORTED /var/lib/centrifuga/data/rpc.log | cut -d' ' -f2,3 | sort -u
 ```

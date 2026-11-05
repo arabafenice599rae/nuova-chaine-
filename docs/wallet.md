@@ -30,15 +30,65 @@ Opzioni: `--rpc URL` e `--keypair FILE` (prevalgono su `wallet.toml`), `--config
 di quel nodo servono solo a *confrontare*. Un nodo falso risponderebbe con i propri
 valori, e copiarli renderebbe inutile il controllo.
 
-Fonti valide, da una fonte diversa dal nodo:
+### Mainnet
 
-- **Mainnet**: i valori ufficiali vanno pubblicati in questo repository (README) al
-  momento della generazione del genesis definitivo. Non esistono ancora. Chiunque
-  può ricalcolarli dalla configurazione del genesis pubblicata:
-  `centrifuga genesis centrifuga.toml` stampa la riga `genesis hash: …`, e
-  `chain_id` è nella sezione `[genesis]`.
-- **Devnet**: sul server, `centrifuga genesis /etc/centrifuga/centrifuga.toml` (stesse
-  righe). Il genesis hash cambia a ogni `--reset` della devnet.
+I valori di mainnet **non esistono ancora**: nascono con il genesis definitivo. In
+quel momento vengono pubblicati quattro valori in tre posti (procedura in
+[release.md](release.md)):
+
+| valore | cos'è |
+|---|---|
+| `chain_id` | `centrifuga:mainnet` |
+| `genesis_hash` | hash del blocco 0 (base58) |
+| SHA-256 del timelock | hash di `programs/timelock/centrifuga_timelock.so` |
+| commit | commit Git da cui si costruisce il binario che calcola il genesis |
+
+I tre posti sono:
+
+1. il **tag Git firmato** `mainnet-genesis` (valori nel messaggio del tag);
+2. il **README** al commit del tag (sezione "Identità di mainnet");
+3. il **sito**.
+
+Il file di configurazione del genesis (`genesis/mainnet.toml`) è committato nel
+commit del tag. Contiene la sola pubkey dell'operatore, nessuna chiave privata. È
+l'unico dato che serve per il ricalcolo, oltre al codice.
+
+### Verificare che i tre valori coincidano
+
+```sh
+git fetch --tags
+git tag -v mainnet-genesis          # firma valida? la chiave è quella attesa?
+git show -s --format=%B mainnet-genesis   # chain_id, genesis_hash, SHA-256 timelock, commit
+git rev-list -n 1 mainnet-genesis   # deve essere il commit indicato nel messaggio
+git show mainnet-genesis:README.md | sed -n '/Identità di mainnet/,/^## /p'
+```
+
+Poi si confrontano gli stessi quattro valori con la pagina del sito. Basta una
+differenza (o una firma non valida) per non usare nessuno dei valori e segnalarlo.
+
+### Ricalcolarli con `centrifuga genesis`
+
+Da un clone pulito, senza scaricare nulla dal nodo:
+
+```sh
+git checkout mainnet-genesis
+cargo build --release --locked
+sha256sum programs/timelock/centrifuga_timelock.so   # = SHA-256 del timelock pubblicato
+target/release/centrifuga genesis genesis/mainnet.toml
+#   Centrifuga (CnFA, centrifuga:mainnet), ...     -> chain_id
+#   genesis hash: <base58>                          -> genesis_hash
+```
+
+Facoltativo, e serve la toolchain SBF: ricompilare il timelock (README,
+"Build riproducibile") e verificare che lo SHA-256 coincida con il `.so` committato.
+
+Se `chain_id` e `genesis_hash` ricalcolati coincidono con quelli pubblicati, vanno in
+`wallet.toml`.
+
+### Devnet
+
+Sul server, `centrifuga genesis /etc/centrifuga/centrifuga.toml` stampa le stesse
+righe. Il genesis hash cambia a ogni `--reset` della devnet.
 
 ## HTTPS
 

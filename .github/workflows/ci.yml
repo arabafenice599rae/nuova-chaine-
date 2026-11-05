@@ -22,6 +22,8 @@ jobs:
       # rust-toolchain.toml installa la versione fissata (1.97.1).
       - run: cargo build --release --bins --examples
       - run: cargo test --release
+      - name: THIRD_PARTY_NOTICES allineato a Cargo.lock
+        run: scripts/third-party-notices.py > "$RUNNER_TEMP/notices" && diff -u THIRD_PARTY_NOTICES "$RUNNER_TEMP/notices"
       - uses: actions/setup-node@v4
         with:
           node-version: 22

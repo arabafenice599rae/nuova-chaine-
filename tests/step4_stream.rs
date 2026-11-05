@@ -149,8 +149,8 @@ async fn tampered_stream_is_rejected() {
     let mut v: Value = serde_json::from_str(&good).unwrap();
     v["accounts"][0]["lamports"] = Value::from(v["accounts"][0]["lamports"].as_u64().unwrap() + 1);
     let mut other = Replica::new(Keypair::new().pubkey(), rules);
-    assert!(other.apply(&good).unwrap_err().contains("firma"), "operatore sbagliato");
-    assert!(rep.apply(&v.to_string()).unwrap_err().contains("hash di stato"), "delta alterato");
+    assert!(other.apply(&good).unwrap_err().contains("invalid signature"), "operatore sbagliato");
+    assert!(rep.apply(&v.to_string()).unwrap_err().contains("state hash mismatch"), "delta alterato");
 }
 
 #[tokio::test(flavor = "multi_thread")]

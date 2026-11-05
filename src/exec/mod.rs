@@ -69,10 +69,10 @@ impl Rules {
     pub fn check(&self, prev_height: u64, prev_ts: u64, h: &Header) -> Result<(), String> {
         let gap = h.height.checked_sub(prev_height).filter(|g| (1..=self.heartbeat_slots).contains(g));
         let Some(gap) = gap else {
-            return Err(format!("blocco {}: salto di altezza da {prev_height} fuori da 1..={}", h.height, self.heartbeat_slots));
+            return Err(format!("block {}: height gap from {prev_height} outside 1..={}", h.height, self.heartbeat_slots));
         };
         if h.timestamp_ms < self.min_timestamp(prev_ts, gap) {
-            return Err(format!("blocco {}: timestamp {} troppo vicino al precedente {prev_ts} (salto {gap})", h.height, h.timestamp_ms));
+            return Err(format!("block {}: timestamp {} too close to previous {prev_ts} (gap {gap})", h.height, h.timestamp_ms));
         }
         Ok(())
     }
@@ -251,11 +251,11 @@ impl Chain {
     fn check_header(&self, b: &Block) -> Result<(), String> {
         let h = &b.header;
         if h.prev_hash != self.last_hash {
-            return Err(format!("blocco {}: header non concatenato", h.height));
+            return Err(format!("block {}: header not chained", h.height));
         }
         self.params.rules.check(self.height, self.last_ts, h)?;
         if !b.verify_signature(&self.params.operator) {
-            return Err(format!("blocco {}: firma operatore invalida", h.height));
+            return Err(format!("block {}: invalid operator signature", h.height));
         }
         Ok(())
     }
@@ -326,8 +326,8 @@ impl Chain {
         if lamports == 0 {
             return;
         }
-        let mut acc: Account = self.svm.get(&from).cloned().expect("debit da account inesistente").into();
-        acc.lamports = acc.lamports.checked_sub(lamports).expect("debit oltre il saldo");
+        let mut acc: Account = self.svm.get(&from).cloned().expect("debit from missing account").into();
+        acc.lamports = acc.lamports.checked_sub(lamports).expect("debit beyond balance");
         self.svm.set(from, acc);
         changed.insert(from);
     }
@@ -399,7 +399,7 @@ impl Chain {
         for tx in txs {
             let nonce = match self.check_at(&tx, height) {
                 Ok(n) => n,
-                Err(e) if strict => return Err(format!("tx {} rifiutata: {e}", tx.signatures[0])),
+                Err(e) if strict => return Err(format!("tx {} rejected: {e}", tx.signatures[0])),
                 Err(_) => continue,
             };
             let writable = self.svm.writable_keys(&tx);
@@ -408,7 +408,7 @@ impl Chain {
             let ex = self.svm.execute(tx.clone());
             if ex.result.is_err() && ex.fee_charged == 0 {
                 if strict {
-                    return Err(format!("tx {} non includibile", tx.signatures[0]));
+                    return Err(format!("tx {} cannot be included", tx.signatures[0]));
                 }
                 continue;
             }
@@ -453,9 +453,9 @@ impl Chain {
     /// Timestamp = max(ora, precedente + salto × slot_ms / 2, precedente + 1).
     pub fn produce_at(&mut self, height: u64, txs: Vec<VersionedTransaction>, now_ms: u64, kp: &Keypair) -> Executed {
         let gap = height.saturating_sub(self.height);
-        assert!((1..=self.params.rules.heartbeat_slots).contains(&gap), "salto di altezza {gap} fuori dalle regole");
+        assert!((1..=self.params.rules.heartbeat_slots).contains(&gap), "height gap {gap} outside the rules");
         let ts = now_ms.max(self.params.rules.min_timestamp(self.last_ts, gap));
-        let mut ex = self.run(height, ts, txs, false).expect("produzione non strict");
+        let mut ex = self.run(height, ts, txs, false).expect("non-strict production");
         ex.block.sign(kp);
         self.finish(&ex);
         ex
@@ -467,11 +467,11 @@ impl Chain {
         self.check_header(b)?;
         let valid = crate::ingress::verify_signatures(&b.txs);
         if valid.iter().any(|ok| !ok) {
-            return Err(format!("blocco {}: firma tx invalida", h.height));
+            return Err(format!("block {}: invalid tx signature", h.height));
         }
         let mut ex = self.run(h.height, h.timestamp_ms, b.txs.clone(), true)?;
         if ex.block.header.state_hash != h.state_hash {
-            return Err(format!("blocco {}: hash di stato diverso", h.height));
+            return Err(format!("block {}: state hash mismatch", h.height));
         }
         ex.block.header.signature = h.signature;
         self.finish(&ex);

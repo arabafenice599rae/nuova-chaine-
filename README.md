@@ -208,7 +208,7 @@ Differenze da Solana, per scelta:
   (indice in memoria ricostruito dal journal al riavvio);
 - ogni metodo non supportato risponde `-32601`. Con `rpc_log = true` il nodo scrive
   in `data_dir/rpc.log` una riga per richiesta (`unix_ms canale metodo esito`, con
-  `NON_SUPPORTATO` per i metodi mancanti): è così che si scopre cosa chiede un wallet.
+  `UNSUPPORTED` per i metodi mancanti): è così che si scopre cosa chiede un wallet.
 
 Test con un client reale (`@solana/web3.js` + `@solana/spl-token`), che avvia da solo
 un nodo devnet con un conto prefinanziato:

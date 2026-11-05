@@ -67,7 +67,7 @@ async fn conn(s: TcpStream, gw: Gateway) {
                         subs.insert(next_id, Sub::Account(k, p[1].clone()));
                         json!(next_id)
                     }),
-                    "signatureSubscribe" => p[0].as_str().and_then(|s| s.parse::<Signature>().ok()).ok_or("firma".to_string()).map(|s| {
+                    "signatureSubscribe" => p[0].as_str().and_then(|s| s.parse::<Signature>().ok()).ok_or("signature".to_string()).map(|s| {
                         next_id += 1;
                         subs.insert(next_id, Sub::Signature(s));
                         json!(next_id)
@@ -77,8 +77,8 @@ async fn conn(s: TcpStream, gw: Gateway) {
                 };
                 gw.log("ws", method, match &result {
                     Ok(_) => "ok",
-                    Err(e) if e == "Method not found" => "NON_SUPPORTATO",
-                    Err(_) => "errore",
+                    Err(e) if e == "Method not found" => "UNSUPPORTED",
+                    Err(_) => "error",
                 });
                 let out = match result {
                     Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),

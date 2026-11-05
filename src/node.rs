@@ -43,7 +43,7 @@ impl Node {
     pub fn open(cfg: Config, keypair: Keypair) -> Result<Node, String> {
         let params = cfg.genesis.params()?;
         if keypair.pubkey() != params.operator {
-            return Err("la chiave dell'operatore non corrisponde al genesis".into());
+            return Err("operator key does not match the genesis".into());
         }
         let dir = cfg.node.data_dir.clone();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -55,7 +55,7 @@ impl Node {
                 // Lo snapshot deve appartenere a questo genesis (parametri inclusi nel suo hash).
                 let expected = genesis::build(&cfg.genesis)?.0.genesis_hash;
                 if s.genesis_hash != expected {
-                    return Err(format!("snapshot di un altro genesis ({} invece di {expected})", s.genesis_hash));
+                    return Err(format!("snapshot of another genesis ({} instead of {expected})", s.genesis_hash));
                 }
                 let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
                 // La finestra parte dal genesis; il journal fino a `snap_height` la riempie.
@@ -72,7 +72,7 @@ impl Node {
                 if b.header.height == snap_height {
                     let h = chain.state_hash(&Default::default());
                     if h != b.header.state_hash {
-                        return Err(format!("snapshot {snap_height}: hash di stato diverso dal journal"));
+                        return Err(format!("snapshot {snap_height}: state hash differs from the journal"));
                     }
                 }
                 chain.note_block(&b)
@@ -84,7 +84,7 @@ impl Node {
             }
         })?;
         if chain.height < snap_height {
-            return Err("journal più corto dello snapshot".into());
+            return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
         Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_tick_ms: None, last_offset, journal, dir, keypair })
@@ -205,7 +205,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
             Ok(n) => n,
             Err(e) => return drop(ready_tx.send(Err(e))),
         };
-        println!("{} ({}): altezza {}, hash {}", node.cfg.genesis.chain_name, node.cfg.genesis.chain_id, node.chain.height, node.chain.last_hash);
+        println!("{} ({}): height {}, hash {}", node.cfg.genesis.chain_name, node.cfg.genesis.chain_id, node.chain.height, node.chain.last_hash);
         let _ = ready_tx.send(Ok(()));
         let res = node.serve(qrx, |n, ex| {
             let _ = events.send(Arc::new(BlockEvent::new(ex)));
@@ -223,7 +223,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
             }
         });
         if let Err(e) = res {
-            eprintln!("errore nodo: {e}");
+            eprintln!("node error: {e}");
             std::process::exit(1);
         }
     });
