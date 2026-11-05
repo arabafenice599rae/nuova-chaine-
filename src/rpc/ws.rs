@@ -61,9 +61,6 @@ async fn conn(s: TcpStream, gw: Gateway) {
                 };
                 let (id, p) = (req["id"].clone(), &req["params"]);
                 let method = req["method"].as_str().unwrap_or("");
-                if gw.trace {
-                    eprintln!("ws: {method}");
-                }
                 let result: Result<Value, String> = match method {
                     "accountSubscribe" => p[0].as_str().ok_or("pubkey".to_string()).and_then(parse_address).map(|k| {
                         next_id += 1;
@@ -76,11 +73,13 @@ async fn conn(s: TcpStream, gw: Gateway) {
                         json!(next_id)
                     }),
                     "accountUnsubscribe" | "signatureUnsubscribe" => Ok(json!(p[0].as_u64().and_then(|i| subs.remove(&i)).is_some())),
-                    _ => {
-                        eprintln!("ws: metodo NON supportato: {method}");
-                        Err("Method not found".into())
-                    }
+                    _ => Err("Method not found".into()),
                 };
+                gw.log("ws", method, match &result {
+                    Ok(_) => "ok",
+                    Err(e) if e == "Method not found" => "NON_SUPPORTATO",
+                    Err(_) => "errore",
+                });
                 let out = match result {
                     Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
                     Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": e}}),

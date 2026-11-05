@@ -66,9 +66,18 @@ pub struct NodeConfig {
     pub max_block_txs: usize,
     /// Indirizzo HTTP del JSON-RPC; il WebSocket usa la porta successiva.
     pub rpc_addr: String,
-    /// Registra ogni metodo RPC chiamato (per vedere cosa chiedono i wallet).
+    /// Registra in `data_dir/rpc.log` ogni metodo RPC/WebSocket ricevuto, con l'esito.
     #[serde(default)]
-    pub rpc_trace: bool,
+    pub rpc_log: bool,
+    /// Indirizzo dello stream (WebSocket): header firmato + delta a ogni blocco.
+    pub stream_addr: String,
+    /// Un client dello stream indietro di più blocchi di così viene disconnesso.
+    pub stream_max_lag_blocks: usize,
+    /// Blocchi recuperabili con `from_height` come delta; oltre, stato completo.
+    pub stream_catchup_blocks: usize,
+    /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
+    pub ingress_tps_per_ip: u32,
+    pub ingress_pending_per_payer: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]

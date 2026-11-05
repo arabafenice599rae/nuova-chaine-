@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  node:
+    name: build, cargo test, web3.js
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: node-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      # rust-toolchain.toml installa la versione fissata (1.97.1).
+      - run: cargo build --release --bins --examples
+      - run: cargo test --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: tests/web3
+      - name: test web3.js contro un nodo devnet
+        run: scripts/web3-node.sh rpc.mjs
+
+  timelock:
+    name: SHA-256 del programma timelock
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-build-sbf
+            ~/.cache/solana
+          key: sbf-${{ runner.os }}-cargo-build-sbf-4.5.0-platform-tools-v1.57
+      - name: installa cargo-build-sbf 4.5.0
+        run: command -v cargo-build-sbf || cargo install cargo-build-sbf --version 4.5.0 --locked
+      - name: compila (platform-tools v1.57, fissate in Cargo.toml)
+        run: cargo build-sbf
+        working-directory: programs/timelock
+      - name: confronta con il README e con il .so committato
+        run: scripts/check-timelock-hash.sh

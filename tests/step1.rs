@@ -102,7 +102,7 @@ fn restart_from_journal_and_snapshot() {
     let t0 = cfg.genesis.timestamp_ms;
     for i in 1..=10u64 {
         let tx = transfer_tx(&payer, &Address::new_from_array([i as u8; 32]), 1_000_000 * i, n.chain.last_hash);
-        assert_eq!(n.ingress.submit(vec![tx]), vec![Some(i - 1)]);
+        assert_eq!(n.ingress.submit(None, vec![tx]), vec![Ok(i - 1)]);
         n.tick(t0 + i * 100).unwrap();
     }
     let (h, state) = (n.chain.last_hash, n.chain.state_hash(&Default::default()));
@@ -114,7 +114,7 @@ fn restart_from_journal_and_snapshot() {
     assert_eq!(n.chain.state_hash(&Default::default()), state);
     // Il blockhash del blocco 9 è ancora valido dopo il riavvio.
     let tx = transfer_tx(&payer, &Address::new_unique(), 1, n.chain.last_hash);
-    n.ingress.submit(vec![tx]);
+    n.ingress.submit(None, vec![tx]);
     assert_eq!(n.tick(t0 + 1100).unwrap().block.txs.len(), 1);
     let h11 = n.chain.last_hash;
     drop(n);

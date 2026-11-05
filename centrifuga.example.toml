@@ -9,7 +9,12 @@ operator_keypair = "operator.json"  # formato solana-keygen (array JSON di 64 by
 snapshot_every = 3000           # blocchi (5 minuti a 100 ms)
 max_block_txs = 5000
 rpc_addr = "127.0.0.1:8899"    # WebSocket su 8900
-rpc_trace = false               # true: registra ogni metodo RPC chiamato
+rpc_log = false                 # true: registra ogni metodo RPC ricevuto in data_dir/rpc.log
+stream_addr = "127.0.0.1:8901"  # stream: header firmato + delta account a ogni blocco
+stream_max_lag_blocks = 600     # client indietro di più di 60 s: disconnesso
+stream_catchup_blocks = 36000   # riconnessione con from_height: delta fino a 1 ora
+ingress_tps_per_ip = 50
+ingress_pending_per_payer = 64
 
 [genesis]
 network = "mainnet"             # "devnet" per ammettere [[genesis.prefund]]

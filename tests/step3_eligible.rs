@@ -49,7 +49,7 @@ fn eligibility_from_journal() {
                 txs.push(transfer_tx(k, &k.pubkey(), 1 + day * 100 + i + u as u64 * 10_000, node.chain.last_hash));
             }
         }
-        node.ingress.submit(txs);
+        node.ingress.submit(None, txs);
         node.tick(t0 + day * DAY + 1_000).unwrap();
     }
     // Una tx fallita (oltre il saldo) non conta.
@@ -57,7 +57,7 @@ fn eligibility_from_journal() {
     let fail = solana_system_interface::instruction::transfer(&k0.pubkey(), &op.pubkey(), 100 * LAMPORTS_PER_CNFA);
     let msg = solana_message::Message::new_with_blockhash(&[fail], Some(&k0.pubkey()), &node.chain.last_hash);
     let tx = solana_transaction::versioned::VersionedTransaction::try_new(solana_message::VersionedMessage::Legacy(msg), &[k0]).unwrap();
-    node.ingress.submit(vec![tx]);
+    node.ingress.submit(None, vec![tx]);
     let mut t = t0 + 6 * DAY;
     while node.chain.height <= 40 {
         t += 100;
