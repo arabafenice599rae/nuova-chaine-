@@ -5,3 +5,4 @@ pub mod genesis;
 pub mod ingress;
 pub mod ledger;
 pub mod node;
+pub mod rpc;

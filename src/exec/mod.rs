@@ -50,6 +50,8 @@ pub struct Executed {
     /// Account (potenzialmente) cambiati: base del delta per lo stream.
     pub changed: BTreeSet<Address>,
     pub results: Vec<TransactionResult>,
+    /// Saldi (prima, dopo) degli account statici di ogni tx, per getTransaction.
+    pub balances: Vec<(Vec<u64>, Vec<u64>)>,
 }
 
 /// Una tx durable-nonce: (account nonce, autorità).
@@ -183,7 +185,7 @@ impl Chain {
         let height = self.height + 1;
         self.svm.begin_block(height, (ts / 1000) as i64, self.last_hash);
         let mut changed = BTreeSet::from([sysvar::clock::id()]);
-        let (mut included, mut results, mut sigs) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut included, mut results, mut sigs, mut balances) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut fees = 0u64;
         for tx in txs {
             let nonce = match self.check(&tx) {
@@ -192,6 +194,8 @@ impl Chain {
                 Err(_) => continue,
             };
             let writable = self.svm.writable_keys(&tx);
+            let keys = tx.message.static_account_keys();
+            let pre: Vec<u64> = keys.iter().map(|k| self.svm.lamports(k)).collect();
             let ex = self.svm.execute(tx.clone());
             if ex.result.is_err() && ex.fee_charged == 0 {
                 if strict {
@@ -202,6 +206,7 @@ impl Chain {
             if let (Err(_), Some((k, auth))) = (&ex.result, nonce) {
                 self.advance_nonce(k, auth);
             }
+            balances.push((pre, keys.iter().map(|k| self.svm.lamports(k)).collect()));
             fees += ex.fee_charged;
             changed.extend(writable);
             self.seen.insert(tx.signatures[0]);
@@ -222,7 +227,7 @@ impl Chain {
         }
         self.height = height;
         self.last_ts = ts;
-        Ok(Executed { block, changed, results })
+        Ok(Executed { block, changed, results, balances })
     }
 
     fn finish(&mut self, ex: &Executed) {
@@ -259,6 +264,10 @@ impl Chain {
         ex.block.header.signature = h.signature;
         self.finish(&ex);
         Ok(ex)
+    }
+
+    pub fn blockhash_valid(&self, h: &Hash) -> bool {
+        self.hashes.contains(h)
     }
 
     pub fn total_lamports(&self) -> u128 {

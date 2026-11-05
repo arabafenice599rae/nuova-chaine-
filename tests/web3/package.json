@@ -1,0 +1,10 @@
+{
+  "name": "centrifuga-web3-compat",
+  "private": true,
+  "type": "module",
+  "description": "Test di compatibilità del gateway RPC con @solana/web3.js (il client usato dai wallet).",
+  "dependencies": {
+    "@solana/spl-token": "0.4.13",
+    "@solana/web3.js": "1.98.4"
+  }
+}

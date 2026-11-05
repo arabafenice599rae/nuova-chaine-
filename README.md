@@ -80,17 +80,61 @@ Programmi nel genesis: System, SPL Token, Token-2022, Associated Token Account,
 Compute Budget, Memo, precompile ed25519/secp256k1 (più quelli che litesvm carica
 di default: Address Lookup Table, Stake).
 
+## JSON-RPC per i wallet
+
+Il gateway (`src/rpc/`) è solo un adattatore per i wallet: HTTP su `rpc_addr`
+(default `127.0.0.1:8899`), WebSocket sulla porta successiva (8900), come si
+aspettano i client Solana. I metodi girano sul thread del nodo tra un blocco e
+l'altro: niente lock, risposte sempre coerenti con l'ultimo blocco.
+
+Metodi HTTP: `getBalance`, `getAccountInfo`, `getMultipleAccounts`,
+`getTokenAccountsByOwner`, `getTokenAccountBalance`, `getLatestBlockhash`,
+`isBlockhashValid`, `getBlockHeight`, `getSlot`, `getEpochInfo`, `getGenesisHash`,
+`getFeeForMessage`, `getMinimumBalanceForRentExemption`,
+`getRecentPrioritizationFees`, `simulateTransaction`, `sendTransaction`,
+`getSignatureStatuses`, `getSignaturesForAddress`, `getTransaction`, `getVersion`,
+`getHealth`. WebSocket: `accountSubscribe`, `signatureSubscribe` (e unsubscribe).
+
+Differenze da Solana, per scelta:
+- tutto è subito `finalized` (un solo firmatario, nessun fork); `commitment` è ignorato;
+- nessuna epoca: `getEpochInfo` riporta `epoch: 0`;
+- `getRecentPrioritizationFees` è sempre 0: la priority fee non compra posizione;
+- `getFeeForMessage` riporta solo la fee base (la priority fee è rimborsata);
+- `getVersion` aggiunge `centrifuga` e `token: {name, symbol, decimals}`;
+- `jsonParsed`: token account e mint SPL interpretati; transazioni in forma
+  parzialmente decodificata (istruzioni con `programId`, `data` in base58);
+  `preTokenBalances`/`postTokenBalances` e `innerInstructions` vuoti;
+- getTransaction/getSignaturesForAddress coprono le tx dall'ultimo snapshot in poi
+  (indice in memoria ricostruito dal journal al riavvio);
+- ogni metodo non supportato risponde `-32601` e finisce nel log
+  (`rpc: metodo NON supportato: ...`). Con `rpc_trace = true` il nodo registra
+  ogni chiamata: è così che si scopre cosa chiede un wallet.
+
+Test con un client reale (`@solana/web3.js` + `@solana/spl-token`):
+
+```
+cd tests/web3 && npm install
+node rpc.mjs http://127.0.0.1:8899 ../../user.json   # keypair prefinanziato
+```
+
+Test con Solflare: impostare `rpc_trace = true`, avviare il nodo raggiungibile dal
+telefono/browser, in Solflare aggiungere il nodo custom, poi controllare il log:
+`grep -E '^(rpc|ws)' log | sort | uniq -c` elenca i metodi chiamati, e le righe
+`NON supportato` quelli mancanti.
+
 ## Stack
 
 - Esecuzione: [`litesvm`](https://crates.io/crates/litesvm) `=0.18.2`; tutte le chiamate
   in `src/exec/litesvm_internal.rs`.
 - Firme: verifica ed25519 in batch (`ed25519-dalek`) all'ingresso e in riesecuzione.
 - Nessun database: journal + snapshot.
+- Rete: tokio, hyper (HTTP/1), tokio-tungstenite (WebSocket).
 
 ## Struttura
 
 ```
 src/main.rs        CLI (genesis, run)
+src/rpc/           gateway JSON-RPC + WebSocket per i wallet
 src/node.rs        apertura (snapshot + journal), ciclo di slot
 src/exec/          esecuzione blocchi, finestra blockhash, nonce, StateHasher
 src/ledger/        blocco, journal, snapshot
@@ -104,6 +148,6 @@ programs/timelock/ programma on-chain dei vault (passo 3)
 - [x] Passo 1: genesis, transfer, blocco firmato, riavvio dal journal, stesso hash.
 - [ ] Passo 2: fee mining e rimborso priority fee.
 - [ ] Passo 3: programma timelock (withdraw lineare, claim_airdrop).
-- [ ] Passo 4: RPC minimo, stream, test con Solflare.
+- [~] Passo 4: RPC e WebSocket fatti e verificati con web3.js; mancano stream, ingresso QUIC e test con Solflare.
 
 Licenza: MIT.

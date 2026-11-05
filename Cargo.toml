@@ -24,9 +24,19 @@ solana-transaction = { version = "4.3", features = ["wincode", "verify"] }
 wincode = "0.6"
 sha2 = "0.10"
 ed25519-dalek = { version = "2.2", features = ["batch"] }
-# Unica dipendenza fuori dal grafo di litesvm: lettura del genesis TOML.
+# Fuori dal grafo di litesvm: TOML del genesis e rete (RPC/WebSocket).
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.30.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+serde_json = "1"
+base64 = "0.22"
+bs58 = "0.5"
+solana-transaction-error = { version = "~3.4", features = ["serde"] }
 
 [dev-dependencies]
 solana-instruction = "~3.5"

@@ -8,6 +8,8 @@ data_dir = "data"
 operator_keypair = "operator.json"  # formato solana-keygen (array JSON di 64 byte)
 snapshot_every = 3000           # blocchi (5 minuti a 100 ms)
 max_block_txs = 5000
+rpc_addr = "127.0.0.1:8899"    # WebSocket su 8900
+rpc_trace = false               # true: registra ogni metodo RPC chiamato
 
 [genesis]
 timestamp_ms = 1798761600000    # 2027-01-01T00:00:00Z

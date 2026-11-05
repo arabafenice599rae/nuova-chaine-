@@ -56,6 +56,11 @@ pub struct NodeConfig {
     pub operator_keypair: PathBuf,
     pub snapshot_every: u64,
     pub max_block_txs: usize,
+    /// Indirizzo HTTP del JSON-RPC; il WebSocket usa la porta successiva.
+    pub rpc_addr: String,
+    /// Registra ogni metodo RPC chiamato (per vedere cosa chiedono i wallet).
+    #[serde(default)]
+    pub rpc_trace: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

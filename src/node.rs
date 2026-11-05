@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -11,11 +13,16 @@ use crate::exec::{Chain, Executed};
 use crate::genesis::{self, Config};
 use crate::ingress::Ingress;
 use crate::ledger::{self, Journal};
+use crate::rpc::index::TxIndex;
+
+/// Richiesta da eseguire sul thread del nodo (RPC, WebSocket).
+pub type Query = Box<dyn FnOnce(&mut Node) + Send>;
 
 pub struct Node {
     pub chain: Chain,
     pub ingress: Arc<Ingress>,
     pub cfg: Config,
+    pub index: TxIndex,
     journal: Journal,
     dir: PathBuf,
     keypair: Keypair,
@@ -40,6 +47,7 @@ impl Node {
                 Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash)
             }
         };
+        let mut index = TxIndex::default();
         let journal = Journal::open(&dir.join("journal.bin"), |b| {
             if b.header.height <= snap_height {
                 if b.header.height == snap_height {
@@ -51,13 +59,13 @@ impl Node {
                 chain.note_block(&b);
                 Ok(())
             } else {
-                chain.apply(&b).map(|_| ())
+                chain.apply(&b).map(|ex| index.record(&ex))
             }
         })?;
         if chain.height < snap_height {
             return Err("journal più corto dello snapshot".into());
         }
-        Ok(Node { chain, ingress: Arc::default(), cfg, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::default(), cfg, index, journal, dir, keypair })
     }
 
     /// Un ciclo di slot: preleva in ordine FIFO, esegue, firma, scrive nel journal.
@@ -65,11 +73,32 @@ impl Node {
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
         let ex = self.chain.produce(txs, now_ms, &self.keypair);
         self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
+        self.index.record(&ex);
         let every = self.cfg.node.snapshot_every;
         if every > 0 && ex.block.header.height % every == 0 {
             self.snapshot()?;
         }
         Ok(ex)
+    }
+
+    /// Ciclo principale: un blocco ogni slot; tra un blocco e l'altro esegue le query.
+    pub fn serve(mut self, queries: Receiver<Query>, mut on_block: impl FnMut(&Node, &Executed)) -> Result<(), String> {
+        let slot = Duration::from_millis(self.cfg.node.slot_ms);
+        let mut next = Instant::now() + slot;
+        loop {
+            let now = Instant::now();
+            if now >= next {
+                let ex = self.tick(crate::node::now_ms())?;
+                on_block(&self, &ex);
+                next = (next + slot).max(now);
+                continue;
+            }
+            match queries.recv_timeout(next - now) {
+                Ok(q) => q(&mut self),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => std::thread::sleep(next - now),
+            }
+        }
     }
 
     pub fn snapshot(&mut self) -> Result<(), String> {
@@ -94,4 +123,8 @@ pub fn read_keypair(path: &std::path::Path) -> Result<Keypair, String> {
     let bytes: Result<Vec<u8>, _> = s.trim().trim_matches(['[', ']']).split(',').map(|x| x.trim().parse::<u8>()).collect();
     let bytes = bytes.map_err(|e| format!("{}: {e}", path.display()))?;
     Keypair::try_from(bytes.as_slice()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
