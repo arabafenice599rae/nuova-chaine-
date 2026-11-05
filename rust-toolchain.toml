@@ -1,0 +1,4 @@
+[toolchain]
+# Richiesta da solana-program-runtime 4.3.x (dipendenza di litesvm 0.18.2).
+channel = "1.97.1"
+profile = "minimal"
