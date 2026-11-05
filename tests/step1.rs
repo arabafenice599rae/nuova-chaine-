@@ -15,6 +15,7 @@ const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 fn config(dir: &str, op: &Keypair, payer: &Keypair) -> Config {
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.operator = op.pubkey().to_string();
+    cfg.genesis.network = "devnet".into();
     cfg.genesis.prefund.push(Prefund { pubkey: payer.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
     let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
     let _ = std::fs::remove_dir_all(&d);
@@ -48,7 +49,9 @@ fn genesis_conservation_and_programs() {
         let a = c.svm.get(&genesis::parse_address(p).unwrap()).unwrap_or_else(|| panic!("{p} mancante"));
         assert!(a.executable(), "{p}");
     }
-    assert_eq!(c.svm.lamports(&genesis::vault_address("users")) - c.svm.rent_exempt(genesis::VAULT_LEN), 50_000_000 * LAMPORTS_PER_CNFA);
+    let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("airdrop")) - rent, 20_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("mining")) - rent, 30_000_000 * LAMPORTS_PER_CNFA);
     // Determinismo: due costruzioni, stesso hash.
     assert_eq!(chain(&cfg).genesis_hash, c.genesis_hash);
     genesis::check_determinism(&cfg.genesis, 5, 100).unwrap();
@@ -68,8 +71,9 @@ fn transfer_signed_block_and_replay() {
     assert!(ex.block.verify_signature(&op.pubkey()));
     assert!(!ex.block.verify_signature(&payer.pubkey()));
     assert_eq!(a.svm.lamports(&to), 2 * LAMPORTS_PER_CNFA);
-    assert_eq!(a.svm.lamports(&payer.pubkey()), 8 * LAMPORTS_PER_CNFA - 5000);
-    assert_eq!(a.svm.lamports(&op.pubkey()), 5000);
+    // Fee mining (passo 2): 10% all'operatore, premio 90% al pagatore.
+    assert_eq!(a.svm.lamports(&payer.pubkey()), 8 * LAMPORTS_PER_CNFA - 500);
+    assert_eq!(a.svm.lamports(&op.pubkey()), 500);
     assert_eq!(a.total_lamports(), SUPPLY_LAMPORTS as u128);
 
     // Duplicato e blockhash sconosciuto: esclusi dal blocco.

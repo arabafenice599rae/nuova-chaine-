@@ -27,7 +27,7 @@ fn cmd_genesis(path: &PathBuf) -> Result<(), String> {
     let (chain, s) = genesis::build(&cfg.genesis)?;
     println!("{} ({sym}), supply {}", cfg.node.token_name, fmt_amount(genesis::SUPPLY_LAMPORTS, sym));
     println!("account di sistema: {}", fmt_amount(s.system_lamports, sym));
-    for name in ["users", "operator", "reserve"] {
+    for name in genesis::VAULT_NAMES {
         let k = genesis::vault_address(name);
         println!("vault {name:<8} {k} {}", fmt_amount(chain.svm.lamports(&k), sym));
     }
@@ -59,8 +59,12 @@ fn cmd_run(path: &PathBuf) -> Result<(), String> {
         let res = node.serve(qrx, |_, ex| {
             let _ = etx.send(Arc::new(BlockEvent::new(ex)));
             if !ex.block.txs.is_empty() {
-                let fees: u64 = ex.results.iter().map(|r| r.as_ref().map_or_else(|e| e.meta.fee, |m| m.fee)).sum();
-                println!("blocco {}: {} tx, fee {}", ex.block.header.height, ex.block.txs.len(), fmt_amount(fees, &sym));
+                let s = &ex.settlement;
+                println!(
+                    "blocco {}: {} tx, fee base {}, operatore {}, riserva {}, premio {}, rimborso priority {}",
+                    ex.block.header.height, ex.block.txs.len(), fmt_amount(s.base, &sym), fmt_amount(s.operator, &sym),
+                    fmt_amount(s.reserve, &sym), fmt_amount(s.reward, &sym), fmt_amount(s.priority_refund, &sym),
+                );
             }
         });
         if let Err(e) = res {

@@ -70,11 +70,43 @@ centrifuga run centrifuga.toml
 
 Allocazione (vault del programma timelock):
 
-| Vault      | Importo                    | Sblocco                                     |
-|------------|----------------------------|---------------------------------------------|
-| `users`    | 50M CnFA                   | 20M airdrop + 30M fee mining                |
-| `operator` | 20M CnFA                   | lineare per blocco in 48 mesi               |
-| `reserve`  | 30M − account di sistema   | bloccata fino al blocco 315.360.000 (~12 mesi) |
+| Vault      | Importo                    | Uso / sblocco                                         |
+|------------|----------------------------|-------------------------------------------------------|
+| `airdrop`  | 20M CnFA                   | claim: 100 CnFA fissi ai primi 200.000 aventi diritto |
+| `mining`   | 30M CnFA                   | premi del fee mining                                  |
+| `operator` | 20M CnFA                   | lineare per blocco in 48 mesi                         |
+| `reserve`  | 30M − account di sistema   | bloccata fino al blocco 315.360.000 (~12 mesi); riceve il 90% delle fee base durante il fee mining |
+
+`network = "mainnet" | "devnet"`. I conti `[[genesis.prefund]]` (sottratti alla
+riserva) sono ammessi solo su devnet: su mainnet `centrifuga genesis` fallisce.
+
+## Fee
+
+- Fee base: 5000 lamport per firma (incluse le firme verificate dalle precompile),
+  burn 0: la supply resta esattamente 100M.
+- **Priority fee**: rimborsata al pagatore nello stesso blocco ed esclusa da ogni
+  calcolo. Non cambia l'ordine (FIFO per seq): pagarla non serve a nulla.
+- **Fee mining** (finché altezza < `fee_mining_end_height`, 24 mesi, e il vault
+  `mining` ha saldo), a ogni blocco:
+  - 10% della fee base all'operatore, 90% al vault `reserve`;
+  - premio = min(`budget_blocco`, 90% della fee base, saldo di `mining`), pagato
+    dal vault `mining` ai pagatori in proporzione alla fee base pagata (il resto
+    della divisione intera resta nel vault);
+  - `budget_blocco` parte da 0,01 CnFA e dimezza ogni `halving_blocks` (6 mesi).
+  - Un operatore che fa transazioni a se stesso riceve al massimo 10% + 90% di
+    quanto paga: guadagno netto ≤ 0.
+- **Fine del fee mining** (altezza raggiunta o vault `mining` vuoto): 100% della fee
+  base all'operatore; il residuo di `mining` passa ad `airdrop` nel primo blocco
+  successivo. Il nodo legge solo il saldo di `mining` e l'altezza di fine.
+- Il residuo si distribuirà con claim agli aventi diritto che hanno usato la chain,
+  con un tetto per account; la lista è calcolata off-chain dal journal e il suo
+  hash pubblicato qui (passo 3).
+- `preBalances`/`postBalances` di getTransaction riflettono la tx; rimborso e
+  premio sono accreditati a fine blocco.
+
+Il nodo conosce solo budget, regola 90/10, rimborso della priority fee e data di
+fine; sblocchi e claim sono nel programma timelock. Il vault `reserve`, ricevendo
+fee, sarà prelevabile in base al saldo reale (non a un totale fisso).
 
 Programmi nel genesis: System, SPL Token, Token-2022, Associated Token Account,
 Compute Budget, Memo, precompile ed25519/secp256k1 (più quelli che litesvm carica
@@ -146,7 +178,7 @@ programs/timelock/ programma on-chain dei vault (passo 3)
 ## Stato
 
 - [x] Passo 1: genesis, transfer, blocco firmato, riavvio dal journal, stesso hash.
-- [ ] Passo 2: fee mining e rimborso priority fee.
+- [x] Passo 2: fee mining 10/90, premio dal vault `mining`, rimborso priority fee, transizione.
 - [ ] Passo 3: programma timelock (withdraw lineare, claim_airdrop).
 - [~] Passo 4: RPC e WebSocket fatti e verificati con web3.js; mancano stream, ingresso QUIC e test con Solflare.
 
