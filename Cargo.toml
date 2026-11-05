@@ -51,3 +51,7 @@ webpki-roots = "1"
 solana-lattice-hash = { version = "=4.3.2", features = ["agave-unstable-api"] }
 blake3 = "1.8"
 
+
+[dev-dependencies]
+# Istruzioni del loader upgradeable per i test di deploy (già nel grafo di litesvm).
+solana-loader-v3-interface = { version = "8.1", features = ["wincode"] }
