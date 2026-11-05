@@ -3,7 +3,8 @@
 //! Vault (creati nel genesis, mai dal programma), layout di `VAULT_LEN` byte:
 //!   [0] tag=1  [1] tipo  [2..34] beneficiario  [34..66] autorità
 //!   [66..74] totale  [74..82] inizio  [82..90] fine  [90..98] prelevato
-//! Tipi: OPERATOR (withdraw lineare), AIRDROP e RESERVE (solo claim),
+//! Tipi: OPERATOR (withdraw lineare tra inizio e fine), AIRDROP (claim fino a
+//! fine esclusa, poi to_reserve), RESERVE (solo claim, da inizio = sblocco),
 //! MINING (nessuna istruzione: lo muove solo il nodo con le regole di fee).
 //!
 //! Ondata (account creato dall'autorità, posseduto dal programma):
@@ -13,14 +14,12 @@
 //!   0 withdraw                [vault(w), beneficiario(w)]
 //!   1 init_wave(importo u64)  [ondata(w), vault, autorità(s)]
 //!   2 claim(indice u32)       [vault(w), ondata(w), destinatario(w), sysvar istruzioni]
-//!   3 to_reserve(lamport u64) [airdrop(w), reserve(w), autorità(s)]
+//!   3 to_reserve              [airdrop(w), reserve(w)]  chiunque, da fine di airdrop
 //!
 //! Il claim richiede, subito prima, un'istruzione della precompile ed25519 con la
 //! firma dell'autorità su `claim_message(ondata, destinatario, importo, indice)`.
 //! I lamport escono solo se resta il minimo per la rent exemption: il limite è il
 //! saldo reale del vault, non un totale fisso.
-
-#![cfg_attr(target_os = "solana", no_std)]
 
 use pinocchio::account_info::AccountInfo;
 use pinocchio::program_error::ProgramError;
@@ -32,11 +31,7 @@ use pinocchio::sysvars::Sysvar;
 use pinocchio::ProgramResult;
 
 #[cfg(target_os = "solana")]
-mod entry {
-    pinocchio::program_entrypoint!(crate::process);
-    pinocchio::no_allocator!();
-    pinocchio::nostd_panic_handler!();
-}
+pinocchio::entrypoint!(process);
 
 pub const VAULT_TAG: u8 = 1;
 pub const WAVE_TAG: u8 = 2;
@@ -130,12 +125,7 @@ pub fn process(program: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Progr
             let index = args.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or(ProgramError::InvalidInstructionData)?;
             claim(program, vault, wave, claimant, ixs, index)
         }
-        (3, [airdrop, reserve, auth, ..]) => {
-            vault_kind(airdrop, program, &[AIRDROP])?;
-            vault_kind(reserve, program, &[RESERVE])?;
-            check_authority(airdrop, auth)?;
-            move_lamports(airdrop, reserve, arg_u64()?)
-        }
+        (3, [airdrop, reserve, ..]) => to_reserve(program, airdrop, reserve),
         (0..=3, _) => Err(ProgramError::NotEnoughAccountKeys),
         _ => Err(ProgramError::InvalidInstructionData),
     }
@@ -185,13 +175,14 @@ fn init_wave(program: &Pubkey, wave: &AccountInfo, vault: &AccountInfo, auth: &A
 }
 
 fn claim(program: &Pubkey, vault: &AccountInfo, wave: &AccountInfo, claimant: &AccountInfo, ixs: &AccountInfo, index: u32) -> ProgramResult {
-    vault_kind(vault, program, &[AIRDROP, RESERVE])?;
-    let (authority, start) = {
+    let kind = vault_kind(vault, program, &[AIRDROP, RESERVE])?;
+    let (authority, start, end) = {
         let v = vault.try_borrow_data()?;
-        (<[u8; 32]>::try_from(&v[34..66]).unwrap(), u64_at(&v, 74))
+        (<[u8; 32]>::try_from(&v[34..66]).unwrap(), u64_at(&v, 74), u64_at(&v, 82))
     };
-    // Reserve: nessun claim prima dello sblocco (inizio = fine).
-    if Clock::get()?.slot < start {
+    // Reserve: nessun claim prima dello sblocco. Airdrop: nessun claim dalla scadenza.
+    let height = Clock::get()?.slot;
+    if height < start || (kind == AIRDROP && height >= end) {
         return Err(Error::Locked.into());
     }
     let amount = {
@@ -212,6 +203,17 @@ fn claim(program: &Pubkey, vault: &AccountInfo, wave: &AccountInfo, claimant: &A
     move_lamports(vault, claimant, amount)?;
     wave.try_borrow_mut_data()?[byte] |= bit;
     Ok(())
+}
+
+/// Dalla scadenza dei claim (fine del vault airdrop) chiunque può spostare
+/// tutto il saldo residuo di "airdrop" in "reserve". Nessun importo, nessuna firma.
+fn to_reserve(program: &Pubkey, airdrop: &AccountInfo, reserve: &AccountInfo) -> ProgramResult {
+    vault_kind(airdrop, program, &[AIRDROP])?;
+    vault_kind(reserve, program, &[RESERVE])?;
+    if Clock::get()?.slot < u64_at(&airdrop.try_borrow_data()?, 82) {
+        return Err(Error::Locked.into());
+    }
+    move_lamports(airdrop, reserve, spendable(airdrop)?)
 }
 
 /// L'istruzione precedente deve essere la precompile ed25519 con una sola firma
