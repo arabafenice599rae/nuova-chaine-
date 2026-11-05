@@ -1,8 +1,11 @@
 //! Test di durata sul nodo reale (`node::start`: ciclo di slot, RPC, stream).
-//!   cargo run --release --example soak -- <accounts> <tps> <minutes>
+//!   cargo run --release --example soak -- <accounts> <tps> <minutes> [--rpc]
 //!   cargo run --release --example soak -- --reopen <dir>     (riavvio e riesecuzione)
-//! Carico: tre thread firmano trasferimenti al ritmo richiesto e li consegnano
-//! all'ingresso del nodo. Ogni minuto: tx inviate, accettate, incluse, TPS effettivi,
+//! Carico: thread client firmano trasferimenti al ritmo richiesto e li consegnano
+//!   - senza --rpc: direttamente all'ingresso del nodo (3 thread). Misura il LIMITE DEL
+//!     NODO, non il throughput di un utente: niente HTTP, JSON, base64.
+//!   - con --rpc: via HTTP/JSON-RPC `sendTransaction` (16 thread, una richiesta per tx),
+//!     come un client vero: è il numero end-to-end (client sulla stessa macchina). Ogni minuto: tx inviate, accettate, incluse, TPS effettivi,
 //! blocco p50/p95/p99 (misurato dentro il nodo), RAM, journal, e due controlli:
 //!   - getSignatureStatuses (RPC) trova una tx di ~290 blocchi fa e non una di >300;
 //!   - ogni 5 minuti `centrifuga wallet send` sotto carico: fee, premio, rimborso e costo
@@ -89,7 +92,9 @@ fn main() {
     if args.first().map(String::as_str) == Some("--reopen") {
         return reopen(Path::new(&args[1]));
     }
-    let a: Vec<u64> = args.iter().map(|x| x.replace('_', "").parse().expect("number")).collect();
+    let via_rpc = args.iter().any(|x| x == "--rpc");
+    let signers_n: u64 = if via_rpc { 16 } else { SIGNERS };
+    let a: Vec<u64> = args.iter().filter(|x| !x.starts_with("--")).map(|x| x.replace('_', "").parse().expect("number")).collect();
     let (n, tps, minutes) = (a[0], a[1], a[2]);
     let dir = std::env::var("LOAD_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("centrifuga-soak"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -110,12 +115,17 @@ fn main() {
     let (sent, accepted, stop) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
     // Campioni (firma, altezza all'invio) per il controllo della finestra degli stati.
     let samples: Arc<Mutex<Vec<(Signature, u64)>>> = Arc::default();
-    println!("{n} account, {tps} tx/s richiesti, {minutes} minuti, rpc_recent_txs {}, snapshot ogni {} blocchi", cfg.node.rpc_recent_txs, cfg.node.snapshot_every);
+    println!(
+        "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi",
+        if via_rpc { "via HTTP/JSON-RPC (end-to-end)" } else { "diretto all'ingresso (limite del nodo)" },
+        cfg.node.rpc_recent_txs,
+        cfg.node.snapshot_every
+    );
     let mut signers = vec![];
-    for w in 0..SIGNERS {
+    for w in 0..signers_n {
         let (ingress, bh, height, sent, accepted, stop, samples) = (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone());
-        let rate = tps as f64 / SIGNERS as f64;
-        let senders: Vec<Keypair> = (0..SENDERS).filter(|i| i % SIGNERS == w).map(key).collect();
+        let rate = tps as f64 / signers_n as f64;
+        let senders: Vec<Keypair> = (0..SENDERS).filter(|i| i % signers_n == w).map(key).collect();
         signers.push(std::thread::spawn(move || {
             let (start, mut done, mut k) = (Instant::now(), 0u64, w);
             while !stop.load(Ordering::Relaxed) {
@@ -128,15 +138,27 @@ fn main() {
                 let h = *bh.lock().unwrap();
                 let batch: Vec<_> = (0..50)
                     .map(|_| {
-                        k += SIGNERS;
-                        let from = &senders[((k / SIGNERS) % senders.len() as u64) as usize];
+                        k += signers_n;
+                        let from = &senders[((k / signers_n) % senders.len() as u64) as usize];
                         transfer_tx(from, &addr(k.wrapping_mul(0x9E37_79B9_7F4A_7C15) % n.max(1)), 1 + k % 100_000, h)
                     })
                     .collect();
                 if k % 1_000 < 50 {
                     samples.lock().unwrap().push((batch[0].signatures[0], height.load(Ordering::Relaxed)));
                 }
-                let ok = ingress.submit(None, batch).iter().filter(|r| r.is_ok()).count() as u64;
+                let ok = if via_rpc {
+                    use base64::Engine;
+                    let url = format!("http://{RPC}");
+                    batch
+                        .iter()
+                        .filter(|t| {
+                            let raw = base64::engine::general_purpose::STANDARD.encode(wincode::serialize(*t).unwrap());
+                            call(&url, "sendTransaction", json!([raw, {"encoding": "base64", "skipPreflight": true}])).is_ok()
+                        })
+                        .count() as u64
+                } else {
+                    ingress.submit(None, batch).iter().filter(|r| r.is_ok()).count() as u64
+                };
                 sent.fetch_add(50, Ordering::Relaxed);
                 accepted.fetch_add(ok, Ordering::Relaxed);
                 done += 50;
