@@ -98,10 +98,19 @@ fn account_at(n: &Node, k: &Address, c: &Value) -> R {
     }
 }
 
+/// `returnData` come in Agave: null se il programma non ne ha scritti.
+fn return_data(m: &litesvm::types::TransactionMetadata) -> Value {
+    let r = &m.return_data;
+    if r.data.is_empty() {
+        return Value::Null;
+    }
+    json!({"programId": r.program_id.to_string(), "data": [b64(&r.data), "base64"]})
+}
+
 fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     match n.chain.svm.simulate(tx) {
-        Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": null}),
-        Err(f) => json!({"err": f.err, "logs": f.meta.logs, "accounts": null, "unitsConsumed": f.meta.compute_units_consumed, "returnData": null}),
+        Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": return_data(&i.meta)}),
+        Err(f) => json!({"err": f.err, "logs": f.meta.logs, "accounts": null, "unitsConsumed": f.meta.compute_units_consumed, "returnData": return_data(&f.meta)}),
     }
 }
 
@@ -133,7 +142,7 @@ fn transaction(r: &TxRecord, c: &Value) -> Value {
         "meta": {
             "err": r.err(), "status": status, "fee": meta.fee, "preBalances": r.pre, "postBalances": r.post,
             "logMessages": meta.logs, "innerInstructions": [], "preTokenBalances": [], "postTokenBalances": [],
-            "rewards": [], "computeUnitsConsumed": meta.compute_units_consumed,
+            "rewards": [], "computeUnitsConsumed": meta.compute_units_consumed, "returnData": return_data(meta),
             "loadedAddresses": {"writable": [], "readonly": []},
         },
     });
