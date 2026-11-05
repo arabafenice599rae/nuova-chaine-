@@ -290,7 +290,7 @@ prefinanziati. Passi e requisiti in [docs/devnet.md](docs/devnet.md).
 ```
 centrifuga genesis [config]                 # costruisce e verifica il genesis
 centrifuga run [config]                     # nodo: blocchi, RPC, WebSocket, stream
-centrifuga balance <pubkey> [url_rpc]       # es. "12.5 CnFA" (simbolo da getVersion)
+centrifuga balance <pubkey> [rpc_url]       # es. "12.5 CnFA" (simbolo da getVersion)
 centrifuga eligible <config> <lista> <out>  # aventi diritto al residuo del fee mining
 centrifuga wallet <new|address|balance|send|token-send|history>  # vedi docs/wallet.md
 ```
@@ -308,6 +308,8 @@ il `.so` committato (`scripts/check-timelock-hash.sh`).
 - Firme: verifica ed25519 in batch (`ed25519-dalek`) all'ingresso e in riesecuzione.
 - Nessun database: journal + snapshot.
 - Rete: tokio, hyper (HTTP/1), tokio-tungstenite (WebSocket).
+- Client CLI (wallet, balance): HTTPS con `rustls` (TLS 1.3, `ring`) e CA pubbliche
+  `webpki-roots`; `http://` solo verso localhost.
 
 ## Struttura
 

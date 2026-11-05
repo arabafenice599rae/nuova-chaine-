@@ -153,7 +153,7 @@ async fn wallet_against_devnet_node() {
         assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
         let bytes = std::fs::read(&fresh).unwrap();
         let o = wallet(&dir, &["new", "--keypair", k], "", &mut seen);
-        assert!(!o.ok && o.text.contains("esiste già"), "{}", o.text);
+        assert!(!o.ok && o.text.contains("already exists"), "{}", o.text);
         assert_eq!(std::fs::read(&fresh).unwrap(), bytes, "file intatto");
         let o = wallet(&dir, &["address", "--keypair", k], "", &mut seen);
         assert_eq!(o.text.trim(), created.pubkey().to_string());
@@ -169,14 +169,16 @@ async fn wallet_against_devnet_node() {
         // Invio CnFA: senza conferma non parte; con --yes sì, con il costo netto.
         let to = Address::new_unique().to_string();
         let o = wallet(&dir, &["send", &to, "1.5"], "n\n", &mut seen);
-        assert!(!o.ok && o.text.contains("invio annullato"), "{}", o.text);
-        assert!(o.text.contains(&format!("destinatario: {to}")) && o.text.contains("importo: 1.5 CnFA") && o.text.contains("fee: "), "{}", o.text);
+        assert!(!o.ok && o.text.contains("cancelled"), "{}", o.text);
+        assert!(o.text.contains(&format!("to: {to}")) && o.text.contains("amount: 1.5 CnFA") && o.text.contains("fee: "), "{}", o.text);
         assert!(wallet(&dir, &["balance", &to], "", &mut seen).text.contains(": 0 CnFA"));
         let o = wallet(&dir, &["send", &to, "1.5"], "s\n", &mut seen);
+        assert!(!o.ok && o.text.contains("cancelled"), "solo y/yes confermano: {}", o.text);
+        let o = wallet(&dir, &["send", &to, "1.5"], "y\n", &mut seen);
         assert!(o.ok, "{}", o.text);
         let o = wallet(&dir, &["send", &to, "1", "--yes"], "", &mut seen);
         assert!(o.ok, "{}", o.text);
-        assert!(o.text.contains("inviata nel blocco") && o.text.contains("premio") && o.text.contains("rimborso") && o.text.contains("costo netto"), "{}", o.text);
+        assert!(o.text.contains("sent in block") && o.text.contains("reward") && o.text.contains("refund") && o.text.contains("net cost"), "{}", o.text);
         assert_eq!(wallet(&dir, &["balance", &to], "", &mut seen).text, format!("{to}: 2.5 CnFA\n"));
 
         // Invio SPL: la prima volta crea l'account del destinatario, la seconda no.
@@ -184,30 +186,30 @@ async fn wallet_against_devnet_node() {
         let o = wallet(&dir, &["balance"], "", &mut seen);
         assert!(o.text.contains(&format!("  100 token {mint}")), "{}", o.text);
         let o = wallet(&dir, &["token-send", &mint.to_string(), &to, "2.5", "--yes"], "", &mut seen);
-        assert!(o.ok && o.text.contains("crea l'account token") && o.text.contains("importo: 2.5 token"), "{}", o.text);
+        assert!(o.ok && o.text.contains("creates the recipient's token account") && o.text.contains("amount: 2.5 token"), "{}", o.text);
         let o = wallet(&dir, &["token-send", &mint.to_string(), &to, "0.25", "--yes"], "", &mut seen);
-        assert!(o.ok && !o.text.contains("crea l'account"), "{}", o.text);
+        assert!(o.ok && !o.text.contains("creates the"), "{}", o.text);
         assert!(wallet(&dir, &["balance", &to], "", &mut seen).text.contains(&format!("  2.75 token {mint}")));
         assert!(wallet(&dir, &["balance"], "", &mut seen).text.contains(&format!("  97.25 token {mint}")));
         let o = wallet(&dir, &["token-send", &mint.to_string(), &to, "0.0000001", "--yes"], "", &mut seen);
-        assert!(!o.ok && o.text.contains("importo non valido"), "più decimali del mint: {}", o.text);
+        assert!(!o.ok && o.text.contains("invalid amount"), "più decimali del mint: {}", o.text);
 
         // Cronologia: 2 invii CnFA, mint, 2 invii SPL.
         let o = wallet(&dir, &["history"], "", &mut seen);
-        assert_eq!(o.text.lines().filter(|l| l.starts_with("blocco ") && l.ends_with("ok")).count(), 5, "{}", o.text);
-        assert_eq!(wallet(&dir, &["history", &Address::new_unique().to_string()], "", &mut seen).text, "nessuna transazione\n");
+        assert_eq!(o.text.lines().filter(|l| l.starts_with("block ") && l.ends_with("ok")).count(), 5, "{}", o.text);
+        assert_eq!(wallet(&dir, &["history", &Address::new_unique().to_string()], "", &mut seen).text, "no transactions\n");
 
         // Nodo errato: chain_id o genesis hash diversi, o identità non fissata.
         for (id, h) in [("centrifuga:mainnet", hash.as_str()), ("centrifuga:devnet", "11111111111111111111111111111111")] {
             conf(&dir, id, h);
             for args in [&["balance"][..], &["send", &to, "1", "--yes"][..], &["history"][..]] {
                 let o = wallet(&dir, args, "", &mut seen);
-                assert!(!o.ok && o.text.contains("nodo rifiutato"), "{args:?}: {}", o.text);
+                assert!(!o.ok && o.text.contains("node rejected"), "{args:?}: {}", o.text);
             }
         }
         std::fs::write(dir.join("wallet.toml"), format!("rpc = \"{URL}\"\n")).unwrap();
         let o = wallet(&dir, &["balance", &me], "", &mut seen);
-        assert!(!o.ok && o.text.contains("chain_id e genesis_hash"), "{}", o.text);
+        assert!(!o.ok && o.text.contains("chain_id and genesis_hash"), "{}", o.text);
         conf(&dir, "centrifuga:devnet", &hash);
         assert!(wallet(&dir, &["balance", &to], "", &mut seen).text.contains("2.5 CnFA"), "nulla inviato dal nodo rifiutato");
 

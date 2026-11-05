@@ -48,6 +48,16 @@ jobs:
             NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/ca.crt" node latency.mjs "https://$DOMAIN" "$RUNNER_TEMP/bench.json" 200
             echo '```'
           } | tee "$OUT/latenza.md"
+      - name: wallet (HTTPS via Caddy; identità dal genesis locale, non dal nodo)
+        run: |
+          CA=/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+          GH=$(sudo target/release/centrifuga genesis /etc/centrifuga/centrifuga.toml | sed -n 's/^genesis hash: //p')
+          CID=$(sudo sed -n 's/^chain_id = "\(.*\)"/\1/p' /etc/centrifuga/centrifuga.toml)
+          test -n "$GH" && test -n "$CID"
+          # Stesso toolchain e target/ di root usati dall'installazione: nessuna ricompilazione completa.
+          sudo env "PATH=/root/.cargo/bin:$PATH" CENTRIFUGA_RPC="https://$DOMAIN" CENTRIFUGA_CA="$CA" \
+            CENTRIFUGA_KEY="$RUNNER_TEMP/bench.json" CENTRIFUGA_CHAIN_ID="$CID" CENTRIFUGA_GENESIS_HASH="$GH" \
+            cargo test --release --locked --test wallet_caddy -- --ignored --nocapture 2>&1 | tee "$OUT/wallet.log"
       - name: rapporto
         if: always()
         run: |
@@ -57,6 +67,10 @@ jobs:
             cat "$OUT/rapporto.txt" 2>/dev/null || echo "rapporto mancante"
             echo '```'
             cat "$OUT/latenza.md" 2>/dev/null || true
+            echo "## Wallet via Caddy"
+            echo '```'
+            grep -E "wallet via Caddy|test result|panicked" "$OUT/wallet.log" 2>/dev/null || echo "log mancante"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           sudo chmod -R a+rX "$OUT"
       - uses: actions/upload-artifact@v4
