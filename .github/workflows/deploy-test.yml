@@ -50,6 +50,7 @@ jobs:
           } | tee "$OUT/latenza.md"
       - name: wallet (HTTPS via Caddy; identità dal genesis locale, non dal nodo)
         run: |
+          set -o pipefail   # senza, "| tee" nasconderebbe un cargo test fallito
           CA=/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
           GH=$(sudo target/release/centrifuga genesis /etc/centrifuga/centrifuga.toml | sed -n 's/^genesis hash: //p')
           CID=$(sudo sed -n 's/^chain_id = "\(.*\)"/\1/p' /etc/centrifuga/centrifuga.toml)
