@@ -78,9 +78,20 @@ const parsed = await conn.getParsedTransaction(sig, { maxSupportedTransactionVer
 assert.equal(parsed.transaction.message.accountKeys[0].signer, true);
 assert.equal(parsed.transaction.message.instructions[1].programId.toBase58(), web3.SystemProgram.programId.toBase58());
 ok("getTransaction(jsonParsed)", parsed.transaction.message.accountKeys.length);
-const hist = await conn.getSignaturesForAddress(payer.publicKey);
-assert.equal(hist[0].signature, sig);
-ok("getSignaturesForAddress", hist.length);
+// Storico: con un indexer (HISTORY=required) la cronologia c'è; senza, il nodo risponde
+// con l'errore -32011 "history not available".
+if (process.env.HISTORY === "required") {
+  let hist = [];
+  for (let i = 0; i < 50 && hist[0]?.signature !== sig; i++) {
+    hist = await conn.getSignaturesForAddress(payer.publicKey); // l'indexer segue il journal
+    if (hist[0]?.signature !== sig) await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.equal(hist[0].signature, sig);
+  ok("getSignaturesForAddress (indexer)", hist.length);
+} else {
+  await assert.rejects(conn.getSignaturesForAddress(payer.publicKey), /history not available/);
+  ok("getSignaturesForAddress senza indexer: errore -32011 chiaro");
+}
 const infos = await conn.getMultipleAccountsInfo([payer.publicKey, to, web3.Keypair.generate().publicKey]);
 assert.equal(infos[2], null);
 ok("getMultipleAccounts");

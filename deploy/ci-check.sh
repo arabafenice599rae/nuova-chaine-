@@ -23,11 +23,11 @@ wait_health() { for _ in $(seq 60); do curl -sf --cacert "$CA" "https://$DOMAIN/
 keyhash() { sha256sum "$VAR/operator.json" "$VAR/faucet.json" | cut -d' ' -f1 | tr '\n' ' '; }
 perms() { for k in operator faucet; do s=$(stat -c '%a %U' "$VAR/$k.json"); [ "$s" = "600 centrifuga" ] || { echo "$k: $s"; return 1; }; echo -n "$k: $s; "; done; }
 
-check "servizi attivi" bash -c 'systemctl is-active centrifuga && systemctl is-active caddy'
+check "servizi attivi" bash -c 'systemctl is-active centrifuga && systemctl is-active centrifuga-indexer && systemctl is-active caddy'
 check "HTTPS /health" bash -c "curl -sf --cacert $CA https://$DOMAIN/health"
 check "HTTPS getVersion" rpc getVersion
 check "permessi chiavi" perms
-check "web3.js (HTTPS + WebSocket)" bash -o pipefail -c "cd $ROOT/tests/web3 && timeout 180 node rpc.mjs https://$DOMAIN $BENCH | tail -3"
+check "web3.js (HTTPS + WebSocket)" bash -o pipefail -c "cd $ROOT/tests/web3 && HISTORY=required timeout 180 node rpc.mjs https://$DOMAIN $BENCH | tail -3"
 check "stream /stream" timeout 60 node "$ROOT/tests/web3/stream-check.mjs" "wss://$DOMAIN/stream"
 
 H1=$(height); K1=$(keyhash); G1=$(rpc getGenesisHash)
@@ -46,7 +46,7 @@ wait_health
 check "chiavi invariate dopo --reset" test "$(keyhash)" = "$K1"
 check "nuovo genesis dopo --reset" test "$(rpc getGenesisHash)" != "$G1"
 check "permessi chiavi dopo --reset" perms
-check "web3.js dopo --reset" bash -o pipefail -c "cd $ROOT/tests/web3 && timeout 180 node rpc.mjs https://$DOMAIN $BENCH | tail -1"
+check "web3.js dopo --reset" bash -o pipefail -c "cd $ROOT/tests/web3 && HISTORY=required timeout 180 node rpc.mjs https://$DOMAIN $BENCH | tail -1"
 
 # Le chiavi private non devono comparire in nessun log.
 journalctl -u centrifuga -u caddy --no-pager > "$OUT/journal.log" 2>&1
