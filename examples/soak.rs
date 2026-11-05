@@ -204,7 +204,8 @@ fn main() {
             let v = call(&url, "getSignatureStatuses", json!([[s.to_string()]])).unwrap();
             if v["value"][0].is_null() { exp_ok += 1 } else { exp_bad += 1 }
         }
-        if minute % 5 == 0 {
+        let every: u64 = std::env::var("WALLET_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        if minute % every == 0 {
             let me = key(SENDERS).pubkey();
             let before = balance(&me);
             // Il binario accanto a target/release/examples/soak.
