@@ -240,3 +240,29 @@ async fn balance_cli_prints_token_amount() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "12.5 CnFA\n");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn node_latency_is_reported_by_get_transaction() {
+    let (op, user) = (Keypair::new(), Keypair::new());
+    let cfg = config("node_latency", 19140, &op, &user, |c| c.node.slot_ms = 50);
+    let url = format!("http://{}", cfg.node.rpc_addr);
+    let gw = start(cfg, &op).await;
+    let tx = transfer_tx(&user, &Address::new_unique(), LAMPORTS_PER_CNFA, height(&gw).await.1);
+    let raw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, wincode::serialize(&tx).unwrap());
+    let sig = tx.signatures[0].to_string();
+    let v = tokio::task::spawn_blocking(move || {
+        use centrifuga::rpc::client::call;
+        call(&url, "sendTransaction", serde_json::json!([raw, {"encoding": "base64"}])).unwrap();
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            let t = call(&url, "getTransaction", serde_json::json!([sig])).unwrap();
+            if !t.is_null() {
+                return t;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let us = v["centrifugaNodeLatencyUs"].as_u64().expect("campo mancante");
+    assert!(us > 0 && us < 2_000_000, "{us} µs");
+}

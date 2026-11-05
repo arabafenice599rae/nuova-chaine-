@@ -238,27 +238,35 @@ batch, applica i limiti e assegna il seq. Un futuro server QUIC chiamerà la ste
   eseguite (un pagatore non può riempire la coda FIFO).
 - Rifiuti: errore `-32003` con il motivo.
 
-Latenza da invio a blocco firmato (`tests/web3/latency.mjs`: `sendTransaction` con
-preflight → notifica `signatureSubscribe`, emessa dopo firma e scrittura del journal).
-Nodo e client sulla stessa macchina (container Linux), loopback, ms:
+Latenza da invio a blocco firmato (`tests/web3/latency.mjs`, 200 tx ad arrivo casuale):
+**totale** = `sendTransaction` con preflight → notifica `signatureSubscribe`, emessa
+dopo firma e scrittura del journal; **nodo** = dall'arrivo della richiesta al nodo al
+blocco firmato, misurato dal nodo (`centrifugaNodeLatencyUs` in `getTransaction`);
+**rete** = totale − nodo. Nodo e client sulla stessa macchina (loopback), slot 100 ms, ms:
 
-| slot | caso | media | p50 | p90 | p99 | max |
-|---|---|---|---|---|---|---|
-| 100 ms | arrivo casuale (200 tx) | 54,5 | 53,5 | 96,0 | 103,4 | 106,4 |
-| 100 ms | invio a inizio slot (200 tx) | 94,6 | 94,9 | 96,0 | 99,2 | 100,2 |
-| 100 ms | raffica di 60 in parallelo | 159,9 | 160,2 | 225,2 | 240,6 | 240,6 |
-| 50 ms | arrivo casuale (200 tx) | 31,1 | 34,2 | 48,9 | 56,1 | 56,9 |
-| 50 ms | invio a inizio slot (200 tx) | 45,1 | 44,8 | 47,0 | 51,6 | 60,2 |
-| 50 ms | raffica di 60 in parallelo | 114,0 | 109,8 | 186,5 | 203,9 | 203,9 |
+| misura | media | p50 | p95 | p99 |
+|---|---|---|---|---|
+| RTT HTTP (`getHealth`) | 1,1 | 0,9 | 2,2 | 2,9 |
+| totale | 51,5 | 49,8 | 98,4 | 101,3 |
+| nodo | 49,4 | 48,3 | 96,5 | 99,6 |
+| rete | 2,1 | 1,8 | 3,7 | 7,7 |
 
 - Produzione di un blocco vuoto (esecuzione, hash di stato, firma, fsync del journal):
   circa 1,05 ms (9.514 blocchi in 10 s con `slot_ms = 1`).
-- La latenza è dominata dall'attesa dello slot (in media metà slot). Nella raffica
-  pesa il preflight (`simulateTransaction`), eseguito una tx alla volta sul thread
-  del nodo. Il trasporto HTTP su loopback è trascurabile: QUIC può guadagnare solo
-  su reti reali, dove questi numeri vanno rimisurati.
+- Il tempo nel nodo è l'attesa dello slot (in media metà slot). In una raffica pesa
+  anche il preflight, eseguito una tx alla volta sul thread del nodo (60 tx in
+  parallelo: p50 160 ms con slot 100 ms).
+- Su loopback la rete è trascurabile: QUIC si valuta con la stessa misura fatta da
+  una rete reale verso un VPS (vedi [docs/solflare-devnet.md](docs/solflare-devnet.md)).
 
-Riprodurre: `scripts/web3-node.sh latency.mjs 100` (slot in ms come secondo argomento).
+Riprodurre in locale: `scripts/web3-node.sh latency.mjs 100` (slot in ms come secondo
+argomento); verso un nodo remoto: `node latency.mjs https://<dominio> bench.json`.
+
+## Deploy devnet
+
+`deploy/devnet-install.sh` installa su un VPS Linux pulito un nodo devnet come servizio
+systemd, con HTTPS (Caddy + Let's Encrypt), chiavi generate sul server e conti
+prefinanziati. Passi e requisiti in [docs/solflare-devnet.md](docs/solflare-devnet.md).
 
 ## CLI
 
@@ -287,6 +295,7 @@ il `.so` committato (`scripts/check-timelock-hash.sh`).
 
 ```
 src/main.rs        CLI (genesis, run, balance, eligible)
+deploy/            installazione devnet su VPS (systemd, HTTPS)
 src/stream/        stream WebSocket per bot e repliche, `Replica` che verifica tutto
 src/rpc/           gateway JSON-RPC + WebSocket per i wallet
 src/node.rs        apertura (snapshot + journal), ciclo di slot

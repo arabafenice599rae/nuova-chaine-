@@ -27,6 +27,8 @@ pub struct Node {
     pub index: TxIndex,
     /// Ultimi blocchi per il recupero dello stream: (altezza, offset nel journal, account cambiati).
     pub recent: VecDeque<(u64, u64, Vec<Address>)>,
+    /// Istante di arrivo delle richieste sendTransaction, per misurare il tempo nel nodo.
+    pub arrivals: std::collections::HashMap<solana_signature::Signature, Instant>,
     /// Offset nel journal dell'ultimo blocco (None all'altezza 0).
     pub last_offset: Option<u64>,
     journal: Journal,
@@ -79,7 +81,7 @@ impl Node {
             return Err("journal più corto dello snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, last_offset, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_offset, journal, dir, keypair })
     }
 
     /// Un ciclo di slot: preleva in ordine FIFO, esegue, firma, scrive nel journal.
@@ -88,6 +90,17 @@ impl Node {
         let ex = self.chain.produce(txs, now_ms, &self.keypair);
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
         self.index.record(&ex);
+        for tx in &ex.block.txs {
+            if let Some(t) = self.arrivals.remove(&tx.signatures[0]) {
+                let us = t.elapsed().as_micros() as u64;
+                if let Some(r) = self.index.by_sig.get_mut(&tx.signatures[0]) {
+                    r.node_us = Some(us);
+                }
+            }
+        }
+        if self.arrivals.len() > 100_000 {
+            self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
+        }
         self.last_offset = Some(offset);
         remember(&mut self.recent, self.cfg.node.stream_catchup_blocks, ex.block.header.height, offset, &ex);
         let every = self.cfg.node.snapshot_every;

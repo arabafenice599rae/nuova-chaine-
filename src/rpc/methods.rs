@@ -119,7 +119,7 @@ fn transaction(r: &TxRecord, c: &Value) -> Value {
         Some(e) => json!({"Err": e}),
         None => json!({"Ok": null}),
     };
-    json!({
+    let mut out = json!({
         "slot": r.slot, "blockTime": r.time_ms / 1000, "version": encode::version(&r.tx.message), "transaction": tx,
         "meta": {
             "err": r.err(), "status": status, "fee": meta.fee, "preBalances": r.pre, "postBalances": r.post,
@@ -127,10 +127,15 @@ fn transaction(r: &TxRecord, c: &Value) -> Value {
             "rewards": [], "computeUnitsConsumed": meta.compute_units_consumed,
             "loadedAddresses": {"writable": [], "readonly": []},
         },
-    })
+    });
+    // Campo extra: dall'arrivo della richiesta HTTP al blocco firmato e scritto (µs).
+    if let Some(us) = r.node_us {
+        out["centrifugaNodeLatencyUs"] = json!(us);
+    }
+    out
 }
 
-pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr>) -> R {
+pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr>, arrived: std::time::Instant) -> R {
     let height = n.chain.height;
     Ok(match method {
         "getHealth" => json!("ok"),
@@ -228,7 +233,10 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             let s = tx.signatures[0];
             use crate::ingress::Rejected;
             let message = match n.ingress.submit(peer, vec![tx]).remove(0) {
-                Ok(_) => return Ok(json!(s.to_string())),
+                Ok(_) => {
+                    n.arrivals.insert(s, arrived);
+                    return Ok(json!(s.to_string()));
+                }
                 Err(Rejected::BadSignature) => "Transaction signature verification failure",
                 Err(Rejected::RateLimited) => "limite di invio per IP superato, riprova",
                 Err(Rejected::TooManyPending) => "troppe tx in coda per questo pagatore, riprova",
