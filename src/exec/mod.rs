@@ -6,7 +6,7 @@ pub mod state_hash;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use solana_account::{Account, ReadableAccount};
+use solana_account::{Account, AccountSharedData, ReadableAccount};
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_keypair::Keypair;
@@ -19,7 +19,7 @@ use solana_transaction::versioned::VersionedTransaction;
 
 use crate::ledger::{Block, Header};
 use litesvm_internal::{Svm, TransactionError};
-use state_hash::{FullSha256, StateHasher};
+use state_hash::LtState;
 
 pub use litesvm::types::TransactionResult;
 
@@ -153,7 +153,10 @@ pub struct Chain {
     /// blockhash -> altezza del blocco.
     hashes: HashMap<Hash, u64>,
     seen: HashSet<Signature>,
-    hasher: Box<dyn StateHasher>,
+    /// LtHash dello stato, aggiornato a ogni blocco con i soli account cambiati.
+    lt: LtState,
+    /// Valore prima del blocco di ogni account che il blocco può modificare.
+    pre: HashMap<Address, Option<AccountSharedData>>,
 }
 
 /// Risultato di un blocco eseguito.
@@ -173,6 +176,7 @@ type Nonce = Option<(Address, Address)>;
 impl Chain {
     /// Catena a partire da uno stato (genesis o snapshot) all'altezza `height`.
     pub fn new(svm: Svm, params: Params, height: u64, last_hash: Hash, last_ts: u64, genesis_hash: Hash) -> Chain {
+        let lt = LtState::full(svm.accounts());
         let mut c = Chain {
             svm,
             params,
@@ -183,7 +187,8 @@ impl Chain {
             window: VecDeque::new(),
             hashes: HashMap::new(),
             seen: HashSet::new(),
-            hasher: Box::new(FullSha256),
+            lt,
+            pre: HashMap::new(),
         };
         c.push_window(height, last_hash, Vec::new());
         c
@@ -198,7 +203,7 @@ impl Chain {
                 height: 0,
                 prev_hash: params_hash,
                 timestamp_ms,
-                state_hash: c.state_hash(&BTreeSet::new()),
+                state_hash: c.state_hash(),
                 signature: Signature::default(),
             },
             txs: vec![],
@@ -212,8 +217,27 @@ impl Chain {
         c
     }
 
-    pub fn state_hash(&mut self, changed: &BTreeSet<Address>) -> Hash {
-        self.hasher.hash(self.svm.accounts(), changed)
+    /// Hash di stato corrente (incrementale).
+    pub fn state_hash(&self) -> Hash {
+        self.lt.hash()
+    }
+
+    /// Ricalcolo completo su tutti gli account: deve coincidere con `state_hash`.
+    pub fn full_state_hash(&self) -> Hash {
+        LtState::full(self.svm.accounts()).hash()
+    }
+
+    /// Dopo modifiche dirette a `svm` (fuori dai blocchi): ricalcolo completo.
+    pub fn rehash(&mut self) {
+        self.lt = LtState::full(self.svm.accounts());
+    }
+
+    /// Registra il valore di `k` prima della sua prima modifica nel blocco.
+    fn touch(&mut self, k: Address) {
+        if !self.pre.contains_key(&k) {
+            let v = self.svm.get(&k).cloned();
+            self.pre.insert(k, v);
+        }
     }
 
     /// Spazio per `n` firme nella finestra anti-duplicati (evita i ridimensionamenti).
@@ -306,6 +330,7 @@ impl Chain {
     /// Una tx durable-nonce fallita fa comunque avanzare il nonce (come Agave),
     /// altrimenti potrebbe essere rieseguita dopo l'uscita dalla finestra.
     fn advance_nonce(&mut self, nonce_key: Address, authority: Address) {
+        self.touch(nonce_key);
         let Some(acc) = self.svm.get(&nonce_key) else { return };
         let mut acc: Account = acc.clone().into();
         let next = DurableNonce::from_blockhash(&self.last_hash);
@@ -318,6 +343,7 @@ impl Chain {
         if lamports == 0 {
             return;
         }
+        self.touch(to);
         let mut acc: Account = self.svm.get(&to).cloned().map(Into::into).unwrap_or(Account {
             owner: system_program::id(),
             ..Account::default()
@@ -331,6 +357,7 @@ impl Chain {
         if lamports == 0 {
             return;
         }
+        self.touch(from);
         let mut acc: Account = self.svm.get(&from).cloned().expect("debit from missing account").into();
         acc.lamports = acc.lamports.checked_sub(lamports).expect("debit beyond balance");
         self.svm.set(from, acc);
@@ -397,6 +424,8 @@ impl Chain {
     /// Esegue un blocco. `strict` = riesecuzione: ogni tx deve essere includibile.
     fn run(&mut self, height: u64, ts: u64, txs: Vec<VersionedTransaction>, strict: bool) -> Result<Executed, String> {
         self.expire(height);
+        self.pre.clear();
+        self.touch(sysvar::clock::id());
         self.svm.begin_block(height, (ts / 1000) as i64, self.last_hash);
         let mut changed = BTreeSet::from([sysvar::clock::id()]);
         let (mut included, mut results, mut sigs, mut balances) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -410,6 +439,9 @@ impl Chain {
             let writable = self.svm.writable_keys(&tx);
             let keys = tx.message.static_account_keys();
             let pre: Vec<u64> = keys.iter().map(|k| self.svm.lamports(k)).collect();
+            for k in &writable {
+                self.touch(*k);
+            }
             let ex = self.svm.execute(tx.clone());
             if ex.result.is_err() && ex.fee_charged == 0 {
                 if strict {
@@ -430,7 +462,10 @@ impl Chain {
             results.push(ex.result);
         }
         let settlement = self.settle(height, &paid, &mut changed);
-        let state_hash = self.state_hash(&changed);
+        let before = std::mem::take(&mut self.pre);
+        self.lt.update(&before, self.svm.accounts());
+        changed.extend(before.keys()); // il delta dello stream copre ogni account toccato
+        let state_hash = self.lt.hash();
         let block = Block {
             header: Header { height, prev_hash: self.last_hash, timestamp_ms: ts, state_hash, signature: Signature::default() },
             txs: included,

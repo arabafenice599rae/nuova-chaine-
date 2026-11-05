@@ -187,6 +187,7 @@ fn transition_when_mining_vault_runs_out() {
     r.lamports += excess;
     t.c.svm.set(mk, m);
     t.c.svm.set(rk, r);
+    t.c.rehash();
     let to = Address::new_unique();
     assert_eq!(t.block(vec![transfer_tx(&a, &to, 1, t.c.last_hash)]).reward, 4_500);
     let s = t.block(vec![transfer_tx(&a, &to, 2, t.c.last_hash)]);
