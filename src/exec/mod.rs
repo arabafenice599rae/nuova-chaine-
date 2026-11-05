@@ -216,6 +216,11 @@ impl Chain {
         self.hasher.hash(self.svm.accounts(), changed)
     }
 
+    /// Spazio per `n` firme nella finestra anti-duplicati (evita i ridimensionamenti).
+    pub fn reserve_signatures(&mut self, n: usize) {
+        self.seen.reserve(n.saturating_sub(self.seen.len()));
+    }
+
     fn push_window(&mut self, height: u64, h: Hash, sigs: Vec<Signature>) {
         self.seen.extend(sigs.iter().copied());
         self.hashes.insert(h, height);

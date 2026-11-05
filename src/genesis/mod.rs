@@ -78,6 +78,9 @@ pub struct NodeConfig {
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
+    /// Tx tenute in RAM per stati e getTransaction; le altre si leggono dallo storico su disco.
+    #[serde(default = "default_rpc_recent_txs")]
+    pub rpc_recent_txs: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -269,4 +272,8 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn default_rpc_recent_txs() -> usize {
+    100_000
 }

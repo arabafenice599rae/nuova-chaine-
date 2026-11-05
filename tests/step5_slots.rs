@@ -261,7 +261,7 @@ async fn node_produces_on_demand_with_heartbeat() {
     let running = node::start(c.clone(), Keypair::try_from(op.to_bytes().as_slice()).unwrap()).unwrap();
     let gw = running.gateway.clone();
     tokio::spawn(running.serve_network());
-    let state = || async { gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.index.by_sig.len())).await.unwrap() };
+    let state = || async { gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.index.count as usize)).await.unwrap() };
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     let mut heights = vec![];

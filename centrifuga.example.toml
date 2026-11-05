@@ -13,6 +13,7 @@ stream_max_lag_blocks = 600     # client indietro di più di 60 s: disconnesso
 stream_catchup_blocks = 36000   # riconnessione con from_height: delta fino a 1 ora
 ingress_tps_per_ip = 50
 ingress_pending_per_payer = 64
+rpc_recent_txs = 100000         # tx in RAM per RPC; lo storico completo è su disco (txlog.bin)
 
 [genesis]
 network = "mainnet"             # "devnet" per ammettere [[genesis.prefund]]

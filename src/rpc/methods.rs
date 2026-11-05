@@ -114,10 +114,6 @@ fn status(r: &TxRecord) -> Value {
 }
 
 fn transaction(r: &TxRecord, c: &Value) -> Value {
-    let meta = match &r.result {
-        Ok(m) => m,
-        Err(f) => &f.meta,
-    };
     let tx = match c["encoding"].as_str() {
         Some("base64") => json!([b64(crate::ledger::block::tx_bytes(&r.tx)), "base64"]),
         Some("base58") => json!([b58(crate::ledger::block::tx_bytes(&r.tx)), "base58"]),
@@ -131,9 +127,9 @@ fn transaction(r: &TxRecord, c: &Value) -> Value {
     let mut out = json!({
         "slot": r.slot, "blockTime": r.time_ms / 1000, "version": encode::version(&r.tx.message), "transaction": tx,
         "meta": {
-            "err": r.err(), "status": status, "fee": meta.fee, "preBalances": r.pre, "postBalances": r.post,
-            "logMessages": meta.logs, "innerInstructions": [], "preTokenBalances": [], "postTokenBalances": [],
-            "rewards": [], "computeUnitsConsumed": meta.compute_units_consumed,
+            "err": r.err(), "status": status, "fee": r.fee, "preBalances": r.pre, "postBalances": r.post,
+            "logMessages": r.logs, "innerInstructions": [], "preTokenBalances": [], "postTokenBalances": [],
+            "rewards": [], "computeUnitsConsumed": r.compute_units,
             "loadedAddresses": {"writable": [], "readonly": []},
         },
     });
@@ -162,7 +158,7 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         // Nessuna epoca: epoch 0 e slotsInEpoch = massimo intero sicuro in JavaScript.
         "getEpochInfo" => json!({
             "absoluteSlot": height, "blockHeight": height, "epoch": 0, "slotIndex": height,
-            "slotsInEpoch": 9_007_199_254_740_991u64, "transactionCount": n.index.by_sig.len(),
+            "slotsInEpoch": 9_007_199_254_740_991u64, "transactionCount": n.index.count,
         }),
         "getLatestBlockhash" => {
             let last_valid = height + n.chain.params.blockhash_window as u64;
@@ -256,12 +252,24 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         }
         "getSignatureStatuses" => {
             let sigs: Vec<String> = arg(p, 0)?;
-            let v = sigs.iter().map(|s| Ok(n.index.by_sig.get(&sig(s)?).map(status))).collect::<Result<Vec<_>, RpcError>>()?;
+            // Come Agave: lo storico su disco solo con searchTransactionHistory.
+            let history = cfg(p, 1)["searchTransactionHistory"].as_bool() == Some(true);
+            let v = sigs
+                .iter()
+                .map(|s| {
+                    let s = sig(s)?;
+                    Ok(match n.index.recent(&s) {
+                        Some(r) => Some(status(r)),
+                        None if history => n.index.get(&s).map(|r| status(&r)),
+                        None => None,
+                    })
+                })
+                .collect::<Result<Vec<_>, RpcError>>()?;
             ctx(n, json!(v))
         }
         "getTransaction" => {
             let s = sig(&arg::<String>(p, 0)?)?;
-            n.index.by_sig.get(&s).map_or(Value::Null, |r| transaction(r, cfg(p, 1)))
+            n.index.get(&s).map_or(Value::Null, |r| transaction(&r, cfg(p, 1)))
         }
         "getSignaturesForAddress" => {
             let a = addr(p, 0)?;
@@ -269,23 +277,10 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             let limit = c["limit"].as_u64().unwrap_or(1000).min(1000) as usize;
             let before = c["before"].as_str().map(sig).transpose()?;
             let until = c["until"].as_str().map(sig).transpose()?;
-            let list = n.index.by_addr.get(&a).map_or(&[][..], |v| v.as_slice());
-            let mut out = Vec::new();
-            let mut started = before.is_none();
-            for s in list.iter().rev() {
-                if !started {
-                    started = Some(*s) == before;
-                    continue;
-                }
-                if Some(*s) == until || out.len() == limit {
-                    break;
-                }
-                let r = &n.index.by_sig[s];
-                out.push(json!({
-                    "signature": s.to_string(), "slot": r.slot, "err": r.err(), "memo": null,
-                    "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
-                }));
-            }
+            let out: Vec<Value> = n.index.history(&a, before, until, limit).into_iter().map(|r| json!({
+                "signature": r.sig.to_string(), "slot": r.slot, "err": r.err, "memo": null,
+                "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
+            })).collect();
             json!(out)
         }
         _ => {

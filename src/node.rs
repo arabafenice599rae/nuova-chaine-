@@ -1,6 +1,6 @@
 //! Nodo: apertura (snapshot + journal), produzione dei blocchi, snapshot periodici.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -28,7 +28,7 @@ pub struct Node {
     /// Ultimi blocchi per il recupero dello stream: (altezza, offset nel journal, account cambiati).
     pub recent: VecDeque<(u64, u64, Vec<Address>)>,
     /// Istante di arrivo delle richieste sendTransaction, per misurare il tempo nel nodo.
-    pub arrivals: std::collections::HashMap<solana_signature::Signature, Instant>,
+    pub arrivals: HashMap<solana_signature::Signature, Instant>,
     /// Ora dell'ultimo blocco prodotto da questo processo (None dopo l'avvio).
     last_tick_ms: Option<u64>,
     /// Offset nel journal dell'ultimo blocco (None all'altezza 0).
@@ -62,7 +62,9 @@ impl Node {
                 Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash)
             }
         };
-        let mut index = TxIndex::default();
+        let mut index = TxIndex::open(&dir, cfg.node.rpc_recent_txs)?;
+        // Firme della finestra anti-duplicati: dimensionata subito (nessun ridimensionamento).
+        chain.reserve_signatures(chain.params.blockhash_window as usize * cfg.node.max_block_txs);
         let mut recent = VecDeque::new();
         let window = cfg.node.stream_catchup_blocks;
         let mut last_offset = None;
@@ -78,7 +80,7 @@ impl Node {
                 chain.note_block(&b)
             } else {
                 let ex = chain.apply(&b)?;
-                index.record(&ex);
+                index.record(&ex, |_| None)?;
                 remember(&mut recent, window, b.header.height, offset, &ex);
                 Ok(())
             }
@@ -105,15 +107,9 @@ impl Node {
         self.last_tick_ms = Some(now_ms);
         let ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
-        self.index.record(&ex);
-        for tx in &ex.block.txs {
-            if let Some(t) = self.arrivals.remove(&tx.signatures[0]) {
-                let us = t.elapsed().as_micros() as u64;
-                if let Some(r) = self.index.by_sig.get_mut(&tx.signatures[0]) {
-                    r.node_us = Some(us);
-                }
-            }
-        }
+        let arrivals = &mut self.arrivals;
+        let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
+        self.index.record(&ex, |s| us.get(s).copied())?;
         if self.arrivals.len() > 100_000 {
             self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
         }
@@ -163,6 +159,8 @@ impl Node {
     }
 
     pub fn snapshot(&mut self) -> Result<(), String> {
+        // Prima lo storico su disco: dopo un riavvio le tx fino allo snapshot ci sono già.
+        self.index.checkpoint()?;
         let c = &self.chain;
         ledger::write_snapshot(&self.dir, c.height, c.genesis_hash, c.svm.accounts().iter()).map_err(|e| format!("snapshot: {e}"))
     }
