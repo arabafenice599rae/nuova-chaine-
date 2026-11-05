@@ -4,7 +4,7 @@ Chain pubblica compatibile con Solana (SVM) a **validatore unico**, in un solo b
 Nessun consenso, nessun voto, nessun relay: chi costruisce il blocco è chi lo firma.
 
 Token nativo: **CENTRIFUGA**, simbolo **CnFA** (forma canonica), 9 decimali. È il lamport
-dell'SVM: i wallet esterni (Solflare, Phantom) lo mostreranno comunque come "SOL".
+dell'SVM: i wallet esterni lo mostreranno comunque come "SOL".
 Supply fissa di 100.000.000 CnFA, zero inflazione, zero staking.
 
 ## Modello di fiducia (onesto)
@@ -217,8 +217,8 @@ cd tests/web3 && npm ci && cd ../..
 scripts/web3-node.sh rpc.mjs
 ```
 
-Test con Solflare: vedi [docs/solflare-devnet.md](docs/solflare-devnet.md) (nodo devnet,
-endpoint HTTPS pubblico, prefund, checklist).
+Nodo devnet su VPS: vedi [docs/devnet.md](docs/devnet.md) (nodo devnet,
+endpoint HTTPS pubblico, prefund, latenza).
 
 ## Stream
 
@@ -273,7 +273,7 @@ blocco firmato, misurato dal nodo (`centrifugaNodeLatencyUs` in `getTransaction`
   anche il preflight, eseguito una tx alla volta sul thread del nodo (60 tx in
   parallelo: p50 160 ms con slot 100 ms).
 - Su loopback la rete è trascurabile: QUIC si valuta con la stessa misura fatta da
-  una rete reale verso un VPS (vedi [docs/solflare-devnet.md](docs/solflare-devnet.md)).
+  una rete reale verso un VPS (vedi [docs/devnet.md](docs/devnet.md)).
 
 Riprodurre in locale: `scripts/web3-node.sh latency.mjs 100` (slot in ms come secondo
 argomento); verso un nodo remoto: `node latency.mjs https://<dominio> bench.json`.
@@ -282,7 +282,7 @@ argomento); verso un nodo remoto: `node latency.mjs https://<dominio> bench.json
 
 `deploy/devnet-install.sh` installa su un VPS Linux pulito un nodo devnet come servizio
 systemd, con HTTPS (Caddy + Let's Encrypt), chiavi generate sul server e conti
-prefinanziati. Passi e requisiti in [docs/solflare-devnet.md](docs/solflare-devnet.md).
+prefinanziati. Passi e requisiti in [docs/devnet.md](docs/devnet.md).
 
 ## CLI
 
@@ -329,6 +329,6 @@ src/claims.rs      aventi diritto al residuo del fee mining (off-chain)
 - [x] Passo 2: fee mining 10/90, premio dal vault `mining`, rimborso priority fee, transizione.
 - [x] Passo 3: programma timelock (withdraw lineare, ondate di claim, to_reserve), aventi diritto dal journal.
 - [x] Passo 4: RPC, WebSocket, stream con recupero, limiti di ingresso, CI, `balance`.
-- [ ] Test con Solflare (guida e checklist in `docs/`); QUIC da valutare con le latenze misurate.
+- [ ] QUIC: da valutare con le latenze misurate da una rete esterna.
 
 Licenza: MIT.

@@ -190,7 +190,7 @@ fi
 cat <<FINE
 
 Nodo devnet pronto.
-  RPC (Solflare):  https://${DOMAIN:-<dominio>}
+  RPC:             https://${DOMAIN:-<dominio>}
   WebSocket:       wss://${DOMAIN:-<dominio>}
   Stream:          wss://${DOMAIN:-<dominio>}/stream
   Operatore:       $OPERATOR
