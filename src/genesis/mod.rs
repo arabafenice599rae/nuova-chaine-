@@ -125,7 +125,7 @@ pub struct Prefund {
 }
 
 pub fn parse_address(s: &str) -> Result<Address, String> {
-    Address::from_str(s).map_err(|e| format!("indirizzo '{s}': {e}"))
+    Address::from_str(s).map_err(|e| format!("address '{s}': {e}"))
 }
 
 impl Config {
@@ -171,24 +171,24 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     match g.network.as_str() {
         "devnet" => {}
         "mainnet" if g.prefund.is_empty() => {}
-        "mainnet" => return Err("prefund ammesso solo con network = \"devnet\"".into()),
-        n => return Err(format!("network sconosciuta: {n} (mainnet | devnet)")),
+        "mainnet" => return Err("prefund allowed only with network = \"devnet\"".into()),
+        n => return Err(format!("unknown network: {n} (mainnet | devnet)")),
     }
     // Identità: simbolo esatto (maiuscole e minuscole contano), chain_id coerente con network.
     if g.symbol != "CnFA" {
-        return Err(format!("simbolo \"{}\": deve essere esattamente \"CnFA\"", g.symbol));
+        return Err(format!("symbol \"{}\": must be exactly \"CnFA\"", g.symbol));
     }
     if g.chain_id != format!("centrifuga:{}", g.network) {
-        return Err(format!("chain_id \"{}\" non corrisponde a network = \"{}\"", g.chain_id, g.network));
+        return Err(format!("chain_id \"{}\" does not match network = \"{}\"", g.chain_id, g.network));
     }
     if g.decimals != 9 || g.chain_name.is_empty() {
-        return Err("servono decimals = 9 (i lamport) e un nome".into());
+        return Err("decimals = 9 (lamports) and a name are required".into());
     }
     if g.slot_ms < 2 || g.heartbeat_slots == 0 {
-        return Err("servono slot_ms >= 2 e heartbeat_slots >= 1".into());
+        return Err("slot_ms >= 2 and heartbeat_slots >= 1 are required".into());
     }
     if g.claims_end_height < g.fee_mining_end_height {
-        return Err("claims_end_height deve seguire fee_mining_end_height".into());
+        return Err("claims_end_height must follow fee_mining_end_height".into());
     }
     let mut svm = Svm::genesis(g.lamports_per_signature);
     svm.add_program(timelock_program_id(), TIMELOCK_SO)?;
@@ -199,14 +199,14 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     for p in &g.prefund {
         prefund.push((parse_address(&p.pubkey)?, p.lamports));
     }
-    let cnfa = |x: u64, n: &str| x.checked_mul(LAMPORTS_PER_CNFA).ok_or(format!("{n} troppo grande"));
+    let cnfa = |x: u64, n: &str| x.checked_mul(LAMPORTS_PER_CNFA).ok_or(format!("{n} too large"));
     let (airdrop, mining) = (cnfa(g.airdrop_cnfa, "airdrop_cnfa")?, cnfa(g.mining_cnfa, "mining_cnfa")?);
     let operator = cnfa(g.operator_cnfa, "operator_cnfa")?;
     let reserve = prefund
         .iter()
         .try_fold(SUPPLY_LAMPORTS, |acc, (_, l)| acc.checked_sub(*l))
         .and_then(|x| x.checked_sub(system)?.checked_sub(VAULTS * rent)?.checked_sub(airdrop)?.checked_sub(mining)?.checked_sub(operator))
-        .ok_or("allocazioni oltre la supply")?;
+        .ok_or("allocations exceed the supply")?;
 
     let tl = timelock_program_id();
     let none = Address::default();
@@ -229,7 +229,7 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     let chain = Chain::genesis(svm, params, g.timestamp_ms);
     let total = chain.total_lamports();
     if total != SUPPLY_LAMPORTS as u128 {
-        return Err(format!("conservazione violata: {total} != {SUPPLY_LAMPORTS}"));
+        return Err(format!("conservation violated: {total} != {SUPPLY_LAMPORTS}"));
     }
     Ok((chain, Summary { system_lamports: system + VAULTS * rent, reserve_lamports: reserve }))
 }
@@ -248,7 +248,7 @@ pub fn check_determinism(g: &GenesisConfig, n: u64) -> Result<Hash, String> {
     let (mut a, _) = build(&g)?;
     let (mut b, _) = build(&g)?;
     if a.last_hash != b.last_hash {
-        return Err("genesis non deterministico".into());
+        return Err("genesis is not deterministic".into());
     }
     for i in 1..=n {
         let to = Address::new_from_array([i as u8; 32]);
@@ -256,11 +256,11 @@ pub fn check_determinism(g: &GenesisConfig, n: u64) -> Result<Hash, String> {
         let ex = a.produce(vec![tx], g.timestamp_ms + i * g.slot_ms, &op);
         let ey = b.apply(&ex.block)?;
         if ey.block.hash() != ex.block.hash() {
-            return Err(format!("blocco {i}: hash diverso"));
+            return Err(format!("block {i}: hash mismatch"));
         }
     }
     if a.total_lamports() != SUPPLY_LAMPORTS as u128 {
-        return Err("conservazione violata dopo i blocchi di test".into());
+        return Err("conservation violated after the test blocks".into());
     }
     Ok(a.last_hash)
 }

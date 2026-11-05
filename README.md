@@ -208,7 +208,7 @@ Differenze da Solana, per scelta:
   (indice in memoria ricostruito dal journal al riavvio);
 - ogni metodo non supportato risponde `-32601`. Con `rpc_log = true` il nodo scrive
   in `data_dir/rpc.log` una riga per richiesta (`unix_ms canale metodo esito`, con
-  `NON_SUPPORTATO` per i metodi mancanti): è così che si scopre cosa chiede un wallet.
+  `UNSUPPORTED` per i metodi mancanti): è così che si scopre cosa chiede un wallet.
 
 Test con un client reale (`@solana/web3.js` + `@solana/spl-token`), che avvia da solo
 un nodo devnet con un conto prefinanziato:
@@ -290,8 +290,9 @@ prefinanziati. Passi e requisiti in [docs/devnet.md](docs/devnet.md).
 ```
 centrifuga genesis [config]                 # costruisce e verifica il genesis
 centrifuga run [config]                     # nodo: blocchi, RPC, WebSocket, stream
-centrifuga balance <pubkey> [url_rpc]       # es. "12.5 CnFA" (simbolo da getVersion)
+centrifuga balance <pubkey> [rpc_url]       # es. "12.5 CnFA" (simbolo da getVersion)
 centrifuga eligible <config> <lista> <out>  # aventi diritto al residuo del fee mining
+centrifuga wallet <new|address|balance|send|token-send|history>  # vedi docs/wallet.md
 ```
 
 ## CI
@@ -307,11 +308,14 @@ il `.so` committato (`scripts/check-timelock-hash.sh`).
 - Firme: verifica ed25519 in batch (`ed25519-dalek`) all'ingresso e in riesecuzione.
 - Nessun database: journal + snapshot.
 - Rete: tokio, hyper (HTTP/1), tokio-tungstenite (WebSocket).
+- Client CLI (wallet, balance): HTTPS con `rustls` (TLS 1.3, `ring`) e CA pubbliche
+  `webpki-roots`; `http://` solo verso localhost.
 
 ## Struttura
 
 ```
-src/main.rs        CLI (genesis, run, balance, eligible)
+src/main.rs        CLI (genesis, run, balance, eligible, wallet)
+src/wallet.rs      wallet a riga di comando (verifica l'identità del nodo)
 deploy/            installazione devnet su VPS (systemd, HTTPS)
 src/stream/        stream WebSocket per bot e repliche, `Replica` che verifica tutto
 src/rpc/           gateway JSON-RPC + WebSocket per i wallet

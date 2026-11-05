@@ -50,7 +50,7 @@ fn invalid(m: impl Into<String>) -> RpcError {
 }
 
 fn arg<T: serde::de::DeserializeOwned>(p: &Value, i: usize) -> Result<T, RpcError> {
-    serde_json::from_value(p.get(i).cloned().unwrap_or(Value::Null)).map_err(|e| invalid(format!("parametro {i}: {e}")))
+    serde_json::from_value(p.get(i).cloned().unwrap_or(Value::Null)).map_err(|e| invalid(format!("param {i}: {e}")))
 }
 
 fn addr(p: &Value, i: usize) -> Result<Address, RpcError> {
@@ -58,7 +58,7 @@ fn addr(p: &Value, i: usize) -> Result<Address, RpcError> {
 }
 
 fn sig(s: &str) -> Result<Signature, RpcError> {
-    Signature::from_str(s).map_err(|e| invalid(format!("firma: {e}")))
+    Signature::from_str(s).map_err(|e| invalid(format!("signature: {e}")))
 }
 
 fn cfg(p: &Value, i: usize) -> &Value {
@@ -73,7 +73,7 @@ fn decode(s: &str, enc: Option<&str>) -> Result<Vec<u8>, RpcError> {
     match enc.unwrap_or("base58") {
         "base58" => bs58::decode(s).into_vec().map_err(|e| invalid(e.to_string())),
         "base64" => base64::engine::general_purpose::STANDARD.decode(s).map_err(|e| invalid(e.to_string())),
-        e => Err(invalid(format!("codifica non supportata: {e}"))),
+        e => Err(invalid(format!("unsupported encoding: {e}"))),
     }
 }
 
@@ -186,7 +186,7 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             let mint = f["mint"].as_str().map(parse_address).transpose().map_err(invalid)?;
             let prog = f["programId"].as_str().map(parse_address).transpose().map_err(invalid)?;
             if mint.is_none() && prog.is_none() {
-                return Err(invalid("serve il filtro mint o programId"));
+                return Err(invalid("mint or programId filter required"));
             }
             let mut out = Vec::new();
             for (k, a) in n.chain.svm.accounts() {
@@ -200,9 +200,9 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             ctx(n, json!(out))
         }
         "getTokenAccountBalance" => {
-            let a = n.chain.svm.get(&addr(p, 0)?).ok_or_else(|| invalid("account inesistente"))?;
-            let (mint, _, amount) = encode::token_account(a).ok_or_else(|| invalid("non è un token account"))?;
-            let dec = encode::mint_decimals(&n.chain.svm, &mint).ok_or_else(|| invalid("mint inesistente"))?;
+            let a = n.chain.svm.get(&addr(p, 0)?).ok_or_else(|| invalid("account not found"))?;
+            let (mint, _, amount) = encode::token_account(a).ok_or_else(|| invalid("not a token account"))?;
+            let dec = encode::mint_decimals(&n.chain.svm, &mint).ok_or_else(|| invalid("mint not found"))?;
             ctx(n, encode::ui_amount(amount, dec))
         }
         // La priority fee non cambia l'ordine ed è rimborsata: è sempre 0.
@@ -211,7 +211,7 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         }
         "getFeeForMessage" => {
             let bytes = decode(&arg::<String>(p, 0)?, Some("base64"))?;
-            let m: VersionedMessage = wincode::deserialize(&bytes).map_err(|e| invalid(format!("messaggio: {e}")))?;
+            let m: VersionedMessage = wincode::deserialize(&bytes).map_err(|e| invalid(format!("message: {e}")))?;
             let fee = n.chain.blockhash_valid(m.recent_blockhash()).then(|| crate::exec::base_fee(&m, n.chain.params.lamports_per_signature));
             ctx(n, json!(fee))
         }
@@ -249,8 +249,8 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
                     return Ok(json!(s.to_string()));
                 }
                 Err(Rejected::BadSignature) => "Transaction signature verification failure",
-                Err(Rejected::RateLimited) => "limite di invio per IP superato, riprova",
-                Err(Rejected::TooManyPending) => "troppe tx in coda per questo pagatore, riprova",
+                Err(Rejected::RateLimited) => "per-IP send limit exceeded, retry",
+                Err(Rejected::TooManyPending) => "too many pending txs for this payer, retry",
             };
             return Err(RpcError { code: -32003, message: message.into(), data: Value::Null });
         }

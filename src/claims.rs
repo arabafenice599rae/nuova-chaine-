@@ -67,7 +67,7 @@ pub fn compute(g: &GenesisConfig, journal: &Path, airdrop: &BTreeSet<Address>) -
         }
         Ok(())
     })?;
-    let (end_height, residual) = end.ok_or("il fee mining non è ancora terminato nel journal")?;
+    let (end_height, residual) = end.ok_or("fee mining has not ended yet in the journal")?;
     let eligible: Vec<Address> = stats
         .into_iter()
         .filter(|(k, (n, days))| *n >= MIN_TX && days.len() >= MIN_DAYS && airdrop.contains(k))
@@ -82,7 +82,7 @@ impl Eligibility {
     /// File pubblicato (testo, deterministico) e il suo SHA-256 in esadecimale.
     pub fn render(&self) -> (String, String) {
         let mut s = format!(
-            "# centrifuga: residuo del fee mining\nend_height={}\nresidual={}\neligible={}\nquota={}\nunassigned={}\n",
+            "# centrifuga: fee mining residual\nend_height={}\nresidual={}\neligible={}\nquota={}\nunassigned={}\n",
             self.end_height,
             self.residual,
             self.eligible.len(),

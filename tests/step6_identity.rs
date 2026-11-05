@@ -58,9 +58,9 @@ fn genesis_rejects_wrong_symbol_chain_id_or_decimals() {
     let (op, user) = (Keypair::new(), Keypair::new());
     let base = devnet(&op, &user);
     for (field, f) in [
-        ("simbolo", Box::new(|c: &mut Config| c.genesis.symbol = "CNFA".into()) as Box<dyn Fn(&mut Config)>),
-        ("simbolo", Box::new(|c: &mut Config| c.genesis.symbol = "cnfa".into())),
-        ("simbolo", Box::new(|c: &mut Config| c.genesis.symbol = "SOL".into())),
+        ("symbol", Box::new(|c: &mut Config| c.genesis.symbol = "CNFA".into()) as Box<dyn Fn(&mut Config)>),
+        ("symbol", Box::new(|c: &mut Config| c.genesis.symbol = "cnfa".into())),
+        ("symbol", Box::new(|c: &mut Config| c.genesis.symbol = "SOL".into())),
         ("chain_id", Box::new(|c: &mut Config| c.genesis.chain_id = "centrifuga:mainnet".into())),
         ("chain_id", Box::new(|c: &mut Config| c.genesis.chain_id = "solana:devnet".into())),
         ("decimals", Box::new(|c: &mut Config| c.genesis.decimals = 8)),
@@ -155,11 +155,11 @@ async fn chain_info_chain_json_version_and_stream_match_genesis() {
     let ok = first(Replica::new(op.pubkey(), rules).expect_chain("centrifuga:devnet", expected_hash)).await;
     assert!(ok.is_ok());
     let wrong_id = first(Replica::new(op.pubkey(), rules).expect_chain("centrifuga:mainnet", expected_hash)).await;
-    assert!(wrong_id.err().unwrap().contains("un'altra chain"));
+    assert!(wrong_id.err().unwrap().contains("another chain"));
     let wrong_hash = first(Replica::new(op.pubkey(), rules).expect_chain("centrifuga:devnet", solana_hash::Hash::new_from_array([7; 32]))).await;
-    assert!(wrong_hash.err().unwrap().contains("un'altra chain"));
+    assert!(wrong_hash.err().unwrap().contains("another chain"));
     // Un messaggio prima dell'identità è rifiutato da una replica che la attende.
     let mut strict = Replica::new(op.pubkey(), rules).expect_chain("centrifuga:devnet", expected_hash);
     let gw_block = centrifuga::stream::header_message(&genesis::build(&c.genesis).unwrap().0.produce(vec![], node::now_ms(), &op).block);
-    assert!(strict.apply(&gw_block).unwrap_err().contains("identità"));
+    assert!(strict.apply(&gw_block).unwrap_err().contains("chain identity missing"));
 }

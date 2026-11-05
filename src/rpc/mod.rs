@@ -58,8 +58,8 @@ pub struct Gateway {
 fn outcome(resp: &Value) -> String {
     match resp["error"]["code"].as_i64() {
         None => "ok".into(),
-        Some(-32601) => "NON_SUPPORTATO".into(),
-        Some(c) => format!("errore {c}"),
+        Some(-32601) => "UNSUPPORTED".into(),
+        Some(c) => format!("error {c}"),
     }
 }
 
@@ -95,7 +95,7 @@ impl Gateway {
                 }
                 json!({"jsonrpc": "2.0", "id": id, "error": err})
             }
-            None => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "nodo non disponibile"}}),
+            None => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "node unavailable"}}),
         };
         self.log("http", &method, &outcome(&resp));
         resp

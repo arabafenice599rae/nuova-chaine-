@@ -95,9 +95,9 @@ fn gap_at_limit_accepted_limit_plus_one_rejected() {
         r.unwrap();
     }
     let bad = resign(bs[1].clone(), &op, |b| b.header.height = 16); // salto 11
-    all_rejected(three_ways(&c, &op, &bs[..1], &bad, "limite_piu_uno"), "salto di altezza");
+    all_rejected(three_ways(&c, &op, &bs[..1], &bad, "limite_piu_uno"), "height gap");
     let zero = resign(bs[1].clone(), &op, |b| b.header.height = 5); // salto 0
-    all_rejected(three_ways(&c, &op, &bs[..1], &zero, "salto_zero"), "salto di altezza");
+    all_rejected(three_ways(&c, &op, &bs[..1], &zero, "salto_zero"), "height gap");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn gap_onto_unlock_height_rejected() {
     let (_, bs) = blocks(&c, &op, &[10, 20, 30, 40, 50, 60, 70, 80, 89, 99]);
     // Dall'89 direttamente allo sblocco (100): salto 11, rifiutato.
     let onto = resign(bs[9].clone(), &op, |b| b.header.height = 100);
-    all_rejected(three_ways(&c, &op, &bs[..9], &onto, "verso_sblocco"), "salto di altezza");
+    all_rejected(three_ways(&c, &op, &bs[..9], &onto, "verso_sblocco"), "height gap");
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn timestamp_too_close_rejected() {
     assert!(!r[0].as_ref().unwrap_err().contains("timestamp"), "al limite la regola passa (fallisce solo l'hash di stato)");
     assert!(r[2].is_ok(), "replica: timestamp al limite accettato");
     let close = resign(bs[1].clone(), &op, |b| b.header.timestamp_ms = prev + 199);
-    all_rejected(three_ways(&c, &op, &bs[..1], &close, "ts_vicino"), "troppo vicino");
+    all_rejected(three_ways(&c, &op, &bs[..1], &close, "ts_vicino"), "too close");
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn future_timestamp_rejected_only_by_realtime_replica() {
     let [apply, journal, replica] = three_ways(&c, &op, &[b1.clone()], &b2, "futuro");
     apply.unwrap();
     journal.unwrap();
-    assert!(replica.unwrap_err().contains("futuro"), "replica in tempo reale");
+    assert!(replica.unwrap_err().contains("in the future"), "replica in tempo reale");
     let mut historical = Replica::new(op.pubkey(), c.genesis.params().unwrap().rules);
     historical.max_future_ms = None;
     historical.apply(&header_message(&b1)).unwrap();
@@ -182,7 +182,7 @@ fn gaps_within_limit_are_produced_and_replayed() {
     assert_eq!((b.height, b.last_hash), (31, a.last_hash));
     let mut c2 = chain(&c);
     c2.apply(&out[0]).unwrap();
-    assert!(c2.apply(&out[2]).err().unwrap().contains("non concatenato"), "salta il blocco 2");
+    assert!(c2.apply(&out[2]).err().unwrap().contains("not chained"), "salta il blocco 2");
 }
 
 #[test]

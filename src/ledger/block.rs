@@ -86,7 +86,7 @@ impl Block {
     pub fn decode(mut b: &[u8]) -> Result<Block, String> {
         let mut take = |n: usize| -> Result<&[u8], String> {
             if b.len() < n {
-                return Err("blocco troncato".into());
+                return Err("truncated block".into());
             }
             let (x, rest) = b.split_at(n);
             b = rest;

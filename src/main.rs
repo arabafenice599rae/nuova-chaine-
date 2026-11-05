@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use centrifuga::genesis::{self, Config};
 use centrifuga::node::{fmt_amount, read_keypair};
 
-const USAGE: &str = "uso: centrifuga genesis|run [config.toml]
-     centrifuga balance <pubkey> [url_rpc]          (default http://127.0.0.1:8899)
-     centrifuga eligible <config.toml> <lista_airdrop.txt> <output.txt>";
+const USAGE: &str = "usage: centrifuga genesis|run [config.toml]
+     centrifuga balance <pubkey> [rpc_url]          (default http://127.0.0.1:8899)
+     centrifuga wallet <new|address|balance|send|token-send|history> ...
+     centrifuga eligible <config.toml> <airdrop_list.txt> <output.txt>";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -14,11 +15,12 @@ fn main() {
         Some("genesis") => cmd_genesis(Path::new(&arg(2, "centrifuga.toml"))),
         Some("run") => cmd_run(Path::new(&arg(2, "centrifuga.toml"))),
         Some("balance") if args.len() >= 3 => cmd_balance(&args[2], &arg(3, "http://127.0.0.1:8899")),
+        Some("wallet") => centrifuga::wallet::main(&args[2..]),
         Some("eligible") if args.len() == 5 => cmd_eligible(&PathBuf::from(&args[2]), &args[3], &args[4]),
         _ => Err(USAGE.to_string()),
     };
     if let Err(e) = res {
-        eprintln!("errore: {e}");
+        eprintln!("error: {e}");
         std::process::exit(1);
     }
 }
@@ -28,15 +30,15 @@ fn cmd_genesis(path: &Path) -> Result<(), String> {
     let sym = &cfg.genesis.symbol;
     let (chain, s) = genesis::build(&cfg.genesis)?;
     println!("{} ({sym}, {}), supply {}", cfg.genesis.chain_name, cfg.genesis.chain_id, fmt_amount(genesis::SUPPLY_LAMPORTS, sym));
-    println!("account di sistema: {}", fmt_amount(s.system_lamports, sym));
+    println!("system accounts: {}", fmt_amount(s.system_lamports, sym));
     for name in genesis::VAULT_NAMES {
         let k = genesis::vault_address(name);
         println!("vault {name:<8} {k} {}", fmt_amount(chain.svm.lamports(&k), sym));
     }
-    println!("riserva netta: {}", fmt_amount(s.reserve_lamports, sym));
-    println!("conservazione: OK (somma = {})", fmt_amount(chain.total_lamports() as u64, sym));
+    println!("net reserve: {}", fmt_amount(s.reserve_lamports, sym));
+    println!("conservation: OK (sum = {})", fmt_amount(chain.total_lamports() as u64, sym));
     let h = genesis::check_determinism(&cfg.genesis, 20)?;
-    println!("determinismo: OK (20 blocchi di test, hash finale {h})");
+    println!("determinism: OK (20 test blocks, final hash {h})");
     println!("genesis hash: {}", chain.genesis_hash);
     Ok(())
 }
@@ -47,7 +49,7 @@ fn cmd_balance(pubkey: &str, url: &str) -> Result<(), String> {
     let version = centrifuga::rpc::client::call(url, "getVersion", serde_json::json!([]))?;
     let symbol = version["token"]["symbol"].as_str().unwrap_or("CnFA").to_string();
     let r = centrifuga::rpc::client::call(url, "getBalance", serde_json::json!([pubkey]))?;
-    let lamports = r["value"].as_u64().ok_or("risposta getBalance non valida")?;
+    let lamports = r["value"].as_u64().ok_or("invalid getBalance response")?;
     println!("{}", fmt_amount(lamports, &symbol));
     Ok(())
 }
@@ -62,9 +64,9 @@ fn cmd_eligible(path: &Path, list: &str, out: &str) -> Result<(), String> {
     let (file, hash) = e.render();
     std::fs::write(out, &file).map_err(|e| format!("{out}: {e}"))?;
     let sym = &cfg.genesis.symbol;
-    println!("fine fee mining al blocco {}, residuo {}", e.end_height, fmt_amount(e.residual, sym));
-    println!("aventi diritto: {} su {} in lista, quota {}", e.eligible.len(), airdrop.len(), fmt_amount(e.quota, sym));
-    println!("non assegnato (a reserve): {}", fmt_amount(e.unassigned, sym));
+    println!("fee mining ends at block {}, residual {}", e.end_height, fmt_amount(e.residual, sym));
+    println!("eligible: {} of {} listed, share {}", e.eligible.len(), airdrop.len(), fmt_amount(e.quota, sym));
+    println!("unassigned (to reserve): {}", fmt_amount(e.unassigned, sym));
     println!("{out} sha256 {hash}");
     Ok(())
 }

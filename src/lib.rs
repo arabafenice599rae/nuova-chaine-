@@ -8,3 +8,4 @@ pub mod ledger;
 pub mod node;
 pub mod rpc;
 pub mod stream;
+pub mod wallet;

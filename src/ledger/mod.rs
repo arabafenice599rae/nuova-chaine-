@@ -43,7 +43,7 @@ impl Journal {
         }
         drop(r);
         if good < total {
-            eprintln!("journal: tronco {} byte finali incompleti", total - good);
+            eprintln!("journal: truncating {} incomplete trailing bytes", total - good);
             file.set_len(good).map_err(|e| e.to_string())?;
         }
         Ok(Journal { file, end: good })
@@ -125,7 +125,7 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
     let mut b32 = [0u8; 32];
     r.read_exact(&mut b8)?;
     if &b8 != SNAP_MAGIC {
-        return Err(io::Error::other("snapshot: magic errato"));
+        return Err(io::Error::other("snapshot: bad magic"));
     }
     let mut u64_ = |r: &mut BufReader<File>| -> io::Result<u64> {
         r.read_exact(&mut b8)?;

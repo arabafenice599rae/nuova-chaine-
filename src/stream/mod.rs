@@ -152,7 +152,7 @@ async fn conn(s: Stream, c: tokio::net::TcpStream) {
         return;
     }
     let Ok(Some(cu)) = orx.await else {
-        let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1013.into(), reason: "nessun blocco ancora: riprova".into() };
+        let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1013.into(), reason: "no block yet: retry".into() };
         let _ = tx.send(Message::Close(Some(frame))).await;
         return;
     };
@@ -223,11 +223,11 @@ pub struct Replica {
 }
 
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
-    v.get(k).ok_or_else(|| format!("campo mancante: {k}"))
+    v.get(k).ok_or_else(|| format!("missing field: {k}"))
 }
 
 fn parse<T: std::str::FromStr>(v: &Value, k: &str) -> Result<T, String> {
-    field(v, k)?.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| format!("campo non valido: {k}"))
+    field(v, k)?.as_str().and_then(|s| s.parse().ok()).ok_or_else(|| format!("invalid field: {k}"))
 }
 
 fn decode64(s: &str) -> Result<Vec<u8>, String> {
@@ -282,7 +282,7 @@ impl Replica {
 
     fn check_state(&self) -> Result<(), String> {
         if self.state_hash() != self.last_state {
-            return Err(format!("blocco {}: hash di stato diverso", self.height));
+            return Err(format!("block {}: state hash mismatch", self.height));
         }
         Ok(())
     }
@@ -295,14 +295,14 @@ impl Replica {
             let got = (field(&v, "chainId")?.as_str().unwrap_or("").to_string(), parse::<Hash>(&v, "genesisHash")?);
             if let Some(exp) = &self.expected_chain {
                 if &got != exp {
-                    return Err(format!("nodo di un'altra chain: {} {} (attesa {} {})", got.0, got.1, exp.0, exp.1));
+                    return Err(format!("node of another chain: {} {} (expected {} {})", got.0, got.1, exp.0, exp.1));
                 }
             }
             self.chain_checked = true;
             return Ok(());
         }
         if self.expected_chain.is_some() && !self.chain_checked {
-            return Err("identità della chain mancante: il nodo non l'ha dichiarata".into());
+            return Err("chain identity missing: the node did not declare it".into());
         }
         match kind {
             Some("block") => {
@@ -320,12 +320,12 @@ impl Replica {
                 });
                 let block = Block { header, txs: txs.collect::<Result<_, String>>()? };
                 if !block.verify_signature(&self.operator) {
-                    return Err(format!("blocco {}: firma non valida", block.header.height));
+                    return Err(format!("block {}: invalid signature", block.header.height));
                 }
                 let h = &block.header;
                 if let Some(max) = self.max_future_ms {
                     if h.timestamp_ms > crate::node::now_ms() + max {
-                        return Err(format!("blocco {}: timestamp nel futuro", h.height));
+                        return Err(format!("block {}: timestamp in the future", h.height));
                     }
                 }
                 // Blocco concatenato (stesso prev_hash): valgono le regole di altezza e
@@ -337,13 +337,13 @@ impl Replica {
                     self.rules.check(self.height, self.last_ts, h)?;
                 } else if anchored {
                     if !accounts.is_null() || h.height <= self.height {
-                        return Err(format!("blocco {}: non concatenato a {}", h.height, self.height));
+                        return Err(format!("block {}: not chained to {}", h.height, self.height));
                     }
                     self.needs_full = true;
                 }
                 self.last_ts = h.timestamp_ms;
                 if self.needs_full && !accounts.is_null() {
-                    return Err("delta ricevuto prima dello stato completo".into());
+                    return Err("delta received before the full state".into());
                 }
                 self.height = block.header.height;
                 self.last_hash = block.hash();
@@ -356,11 +356,11 @@ impl Replica {
             }
             Some("sync") => {
                 if field(&v, "height")?.as_u64() != Some(self.height) {
-                    return Err("sync non allineato all'ultimo header".into());
+                    return Err("sync not aligned with the last header".into());
                 }
                 let full = field(&v, "full")?.as_bool() == Some(true);
                 if self.needs_full && !full {
-                    return Err("serve uno stato completo".into());
+                    return Err("a full state is required".into());
                 }
                 if full {
                     self.accounts.clear();
@@ -369,7 +369,7 @@ impl Replica {
                 self.apply_accounts(field(&v, "accounts")?)?;
                 self.check_state()
             }
-            _ => Err("tipo di messaggio sconosciuto".into()),
+            _ => Err("unknown message type".into()),
         }
     }
 }
