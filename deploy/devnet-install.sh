@@ -162,7 +162,9 @@ ${TLS_LINE}
 		reverse_proxy 127.0.0.1:8901
 	}
 	# WebSocket JSON-RPC (accountSubscribe, signatureSubscribe) sulla stessa porta.
-	@ws header Connection *Upgrade*
+	# Senza distinzione di maiuscole: alcuni client (es. WebSocket di Node) mandano
+	# "connection: upgrade" e "upgrade: websocket" in minuscolo.
+	@ws header_regexp Upgrade (?i)websocket
 	handle @ws {
 		reverse_proxy 127.0.0.1:8900
 	}
