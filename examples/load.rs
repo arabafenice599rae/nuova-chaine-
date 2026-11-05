@@ -135,6 +135,20 @@ fn main() {
     }
 }
 
+/// CPU per thread (secondi): (tid, nome) -> utime + stime.
+fn thread_cpu() -> std::collections::HashMap<(u64, String), f64> {
+    let mut out = std::collections::HashMap::new();
+    for e in std::fs::read_dir("/proc/self/task").into_iter().flatten().flatten() {
+        let Ok(st) = std::fs::read_to_string(e.path().join("stat")) else { continue };
+        let (Some(open), Some(close)) = (st.find('('), st.rfind(')')) else { continue };
+        let tid = st[..open].trim().parse().unwrap_or(0);
+        let f: Vec<&str> = st[close + 2..].split_whitespace().collect();
+        let ticks = f[11].parse::<f64>().unwrap_or(0.0) + f[12].parse::<f64>().unwrap_or(0.0);
+        out.insert((tid, st[open + 1..close].to_string()), ticks / 100.0);
+    }
+    out
+}
+
 /// Real node with RPC: CLIENTS threads send pre-signed txs (skipPreflight) over
 /// HTTP; time until all are included. Then a short sample with preflight.
 fn rpc_tps(mut cfg: Config, op: &Keypair, senders: &[Keypair], n: u64, bh: solana_hash::Hash, count: u64) -> (f64, f64, u64, f64) {
@@ -155,6 +169,9 @@ fn rpc_tps(mut cfg: Config, op: &Keypair, senders: &[Keypair], n: u64, bh: solan
     let indexed = || rt.block_on(gw.query(|nd: &mut Node| nd.index.by_sig.len())).unwrap();
     let base = indexed();
     let url = "http://127.0.0.1:19300";
+    // Tid del thread del nodo: letto dal thread stesso.
+    let node_tid: u64 = rt.block_on(gw.query(|_| std::fs::read_to_string("/proc/thread-self/stat").unwrap().split(' ').next().unwrap().parse().unwrap())).unwrap();
+    let cpu0 = thread_cpu();
     let t = Instant::now();
     std::thread::scope(|s| {
         for chunk in raws.chunks(raws.len().div_ceil(CLIENTS)) {
@@ -166,6 +183,25 @@ fn rpc_tps(mut cfg: Config, op: &Keypair, senders: &[Keypair], n: u64, bh: solan
         }
     });
     let sent_s = t.elapsed().as_secs_f64();
+    let cpu1 = thread_cpu();
+    let (mut node_cpu, mut tokio_cpu, mut other_cpu) = (0.0, 0.0, 0.0);
+    for (k, v) in &cpu1 {
+        let d = v - cpu0.get(k).copied().unwrap_or(0.0);
+        if k.0 == node_tid {
+            node_cpu += d;
+        } else if k.1.starts_with("tokio") {
+            tokio_cpu += d;
+        } else {
+            other_cpu += d;
+        }
+    }
+    println!(
+        "rpc CPU durante l'invio ({sent_s:.1} s): thread del nodo {:.0}%, tokio (HTTP, JSON) {:.0}%, client e altro {:.0}% (su {} core)",
+        node_cpu / sent_s * 100.0,
+        tokio_cpu / sent_s * 100.0,
+        other_cpu / sent_s * 100.0,
+        std::thread::available_parallelism().map_or(0, |n| n.get())
+    );
     while indexed() < base + count as usize {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

@@ -2,8 +2,11 @@
 //! del carico massimo sostenibile (p99 del blocco < 100 ms):
 //!   A. LtHash a ogni blocco (quello nel nodo);
 //!   B. Merkle incrementale a ogni blocco, con prove per account;
-//!   C. ibrido: LtHash a ogni blocco + radice Merkle ogni secondo (10 blocchi), su un
-//!      thread separato con i soli account cambiati.
+//!   C. ibrido denso: LtHash a ogni blocco + radice B ogni secondo (10 blocchi), su un
+//!      thread separato con i soli account cambiati;
+//!   D. Merkle sparso (posizione = hash della pubkey, prove di appartenenza e assenza);
+//!   E. ibrido sparso: LtHash a ogni blocco + radice D ogni secondo, su un thread.
+//! B e C (denso) sono solo un riferimento: la radice dipende dalla storia.
 //!   cargo run --release --example compare -- <accounts> [blocks_per_step] [--steps 2000,2100,...] [--spl]
 //! --spl: ogni tx crea (CreateIdempotent) l'account token associato del destinatario
 //! e gli trasferisce un token SPL (TransferChecked), invece di un trasferimento CnFA.
@@ -13,6 +16,8 @@
 
 #[path = "common/merkle.rs"]
 mod merkle;
+#[path = "common/smt.rs"]
+mod smt;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -131,12 +136,80 @@ fn from(p: &Phases, hash: f64) -> B {
     B { total: exec + hash + sign + journal + other, exec, hash, sign, journal, other }
 }
 
+/// Albero di Merkle (denso o sparso) usato da una variante.
+trait Tree: Send + 'static {
+    fn build(a: &HashMap<Address, AccountSharedData>) -> Self;
+    fn update(&mut self, changed: &[(Address, Option<&AccountSharedData>)]);
+    fn root(&self) -> [u8; 32];
+}
+
+impl Tree for Merkle {
+    fn build(a: &HashMap<Address, AccountSharedData>) -> Self {
+        Merkle::build(a)
+    }
+    fn update(&mut self, c: &[(Address, Option<&AccountSharedData>)]) {
+        Merkle::update(self, c)
+    }
+    fn root(&self) -> [u8; 32] {
+        Merkle::root(self)
+    }
+}
+
+impl Tree for smt::Sparse {
+    fn build(a: &HashMap<Address, AccountSharedData>) -> Self {
+        smt::Sparse::build(a)
+    }
+    fn update(&mut self, c: &[(Address, Option<&AccountSharedData>)]) {
+        smt::Sparse::update(self, c)
+    }
+    fn root(&self) -> [u8; 32] {
+        smt::Sparse::root(self)
+    }
+}
+
+const NAMES: [&str; 5] = ["LtHash", "Merkle denso (rif.)", "ibrido denso (rif.)", "Merkle sparso", "ibrido sparso"];
+
 struct Step {
     load: usize,
-    a: Vec<B>,
-    b: Vec<B>,
-    c: Vec<B>,
-    root_ms: Vec<f64>,
+    v: [Vec<B>; 5],
+    root_ms: [Vec<f64>; 2],
+}
+
+/// Passaggio con il thread della radice ogni secondo (ibrido): tempo del blocco sul
+/// thread del nodo = blocco + copia degli account cambiati.
+fn hybrid<T: Tree>(node: &mut Node, all: &[Vec<VersionedTransaction>], load: usize) -> (Vec<B>, Vec<f64>) {
+    let mut tree = T::build(node.chain.svm.accounts());
+    let (tx, rx) = mpsc::channel::<Vec<(Address, Option<AccountSharedData>)>>();
+    let worker = std::thread::spawn(move || {
+        let mut times = vec![];
+        for batch in rx {
+            let t = Instant::now();
+            let list: Vec<(Address, Option<&AccountSharedData>)> = batch.iter().map(|(k, a)| (*k, a.as_ref())).collect();
+            tree.update(&list);
+            std::hint::black_box(tree.root()); // qui la radice verrebbe firmata
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        times
+    });
+    let mut c = vec![];
+    let mut pending: HashMap<Address, Option<AccountSharedData>> = HashMap::new();
+    let mut now = centrifuga::node::now_ms();
+    for (i, txs) in all.iter().enumerate() {
+        assert!(node.ingress.submit(None, txs[..load].to_vec()).iter().all(|x| x.is_ok()));
+        now += 100;
+        let ex = node.tick(now).unwrap();
+        let t = Instant::now();
+        let acc = node.chain.svm.accounts();
+        for k in &ex.changed {
+            pending.insert(*k, acc.get(k).cloned());
+        }
+        if i % PER_ROOT == PER_ROOT - 1 {
+            tx.send(pending.drain().collect()).unwrap();
+        }
+        c.push(from(&ex.phases, ms(ex.phases.hash) + t.elapsed().as_secs_f64() * 1e3));
+    }
+    drop(tx);
+    (c, worker.join().unwrap())
 }
 
 fn main() {
@@ -193,14 +266,6 @@ fn main() {
     let restart_lt = t.elapsed().as_secs_f64();
     let base_ram = rss_mb();
     let bh = node.chain.last_hash;
-    let r0 = rss_mb();
-    let t = Instant::now();
-    let mk0 = Merkle::build(node.chain.svm.accounts());
-    let mk_build = t.elapsed().as_secs_f64();
-    let mk_ram = rss_mb().saturating_sub(r0);
-    // Dimensione calcolata: livelli (32 byte per nodo) + indice pubkey -> foglia (~52 byte per voce).
-    let mk_calc = (mk0.levels.iter().map(|l| l.len()).sum::<usize>() * 32 + mk0.index.len() * 52) / 1_000_000;
-    // Prove (B e C hanno lo stesso formato).
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     let mut rnd = move || {
         seed ^= seed << 13;
@@ -208,17 +273,47 @@ fn main() {
         seed ^= seed << 17;
         seed
     };
-    let root = mk0.root();
     let acc = node.chain.svm.accounts();
     let ks: Vec<Address> = (0..10_000).map(|_| addr(rnd() % n)).collect();
+    // Denso: RAM, costruzione, prove.
+    let r0 = rss_mb();
+    let t = Instant::now();
+    let mk0 = Merkle::build(acc);
+    let mk_build = t.elapsed().as_secs_f64();
+    let mk_ram = rss_mb().saturating_sub(r0);
+    let root = mk0.root();
     let proofs: Vec<_> = ks.iter().map(|k| mk0.proof(k)).collect();
     let t = Instant::now();
     for (k, (i, sib)) in ks.iter().zip(&proofs) {
         assert!(merkle::verify(&root, k, &acc[k], *i, sib));
     }
-    let verify_us = t.elapsed().as_secs_f64() * 1e6 / ks.len() as f64;
-    let proof_bytes = 8 + 32 * proofs[0].1.len();
-    drop((node, mk0));
+    let mk_verify = t.elapsed().as_secs_f64() * 1e6 / ks.len() as f64;
+    let mk_proof = 8 + 32 * proofs[0].1.len();
+    drop((mk0, proofs));
+    // Sparso: RAM, costruzione, prove di appartenenza e di assenza.
+    let r0 = rss_mb();
+    let t = Instant::now();
+    let sp0 = smt::Sparse::build(acc);
+    let sp_build = t.elapsed().as_secs_f64();
+    let sp_ram = rss_mb().saturating_sub(r0);
+    let root = sp0.root();
+    let proofs: Vec<Vec<u8>> = ks.iter().map(|k| sp0.proof(k)).collect();
+    let t = Instant::now();
+    for (k, p) in ks.iter().zip(&proofs) {
+        assert!(smt::verify(&root, k, Some(&acc[k]), p));
+    }
+    let sp_verify = t.elapsed().as_secs_f64() * 1e6 / ks.len() as f64;
+    let sp_proof = proofs.iter().map(|p| p.len()).sum::<usize>() / proofs.len();
+    let absent: Vec<Address> = (0..1_000).map(|_| Address::new_unique()).collect();
+    let ap: Vec<Vec<u8>> = absent.iter().map(|k| sp0.proof(k)).collect();
+    let t = Instant::now();
+    for (k, p) in absent.iter().zip(&ap) {
+        assert!(smt::verify(&root, k, None, p));
+    }
+    let sp_absent_us = t.elapsed().as_secs_f64() * 1e6 / absent.len() as f64;
+    let sp_absent = ap.iter().map(|p| p.len()).sum::<usize>() / ap.len();
+    drop((sp0, proofs));
+    drop(node);
 
     // Tx firmate in anticipo per il carico massimo; ogni gradino usa i primi `load` di ogni blocco.
     let max = *step_list.iter().max().unwrap();
@@ -237,10 +332,10 @@ fn main() {
     let mut peak_ram = 0;
     for &load in &step_list {
         cfg.node.max_block_txs = load;
-        // Passaggio 1: A e B.
+        // Passaggio 1: A, B e D sugli stessi blocchi (B e D: costo LtHash tolto e sostituito).
         let mut node = open(&cfg);
-        let mut mk = Merkle::build(node.chain.svm.accounts());
-        let (mut a, mut b) = (vec![], vec![]);
+        let (mut mk, mut sp) = (Merkle::build(node.chain.svm.accounts()), smt::Sparse::build(node.chain.svm.accounts()));
+        let (mut a, mut b, mut d) = (vec![], vec![], vec![]);
         let mut now = centrifuga::node::now_ms();
         for txs in &all {
             assert!(node.ingress.submit(None, txs[..load].to_vec()).iter().all(|x| x.is_ok()));
@@ -254,78 +349,53 @@ fn main() {
             mk.update(&list);
             std::hint::black_box(mk.root());
             let mk_ms = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            sp.update(&list);
+            std::hint::black_box(sp.root());
+            let sp_ms = t.elapsed().as_secs_f64() * 1e3;
             a.push(from(&ex.phases, ms(ex.phases.hash)));
             b.push(from(&ex.phases, mk_ms));
+            d.push(from(&ex.phases, sp_ms));
         }
-        assert_eq!(mk.root(), mk.full_root(node.chain.svm.accounts()), "Merkle incrementale = completo");
+        assert_eq!(mk.root(), mk.full_root(node.chain.svm.accounts()), "Merkle denso incrementale = completo");
+        assert_eq!(sp.root(), smt::Sparse::build(node.chain.svm.accounts()).root(), "Merkle sparso incrementale = ricostruito");
         peak_ram = peak_ram.max(rss_mb());
-        drop((node, mk));
-        // Passaggio 2: C con il thread Merkle in esecuzione.
+        drop((node, mk, sp));
+        // Passaggi 2 e 3: ibridi con il thread della radice in esecuzione.
         let mut node = open(&cfg);
-        let mut tree = Merkle::build(node.chain.svm.accounts());
-        let (tx, rx) = mpsc::channel::<Vec<(Address, Option<AccountSharedData>)>>();
-        let worker = std::thread::spawn(move || {
-            let mut times = vec![];
-            for batch in rx {
-                let t = Instant::now();
-                let list: Vec<(Address, Option<&AccountSharedData>)> = batch.iter().map(|(k, a)| (*k, a.as_ref())).collect();
-                tree.update(&list);
-                std::hint::black_box(tree.root()); // qui la radice verrebbe firmata
-                times.push(t.elapsed().as_secs_f64() * 1e3);
-            }
-            times
-        });
-        let mut c = vec![];
-        let mut pending: HashMap<Address, Option<AccountSharedData>> = HashMap::new();
-        let mut now = centrifuga::node::now_ms();
-        for (i, txs) in all.iter().enumerate() {
-            assert!(node.ingress.submit(None, txs[..load].to_vec()).iter().all(|x| x.is_ok()));
-            now += 100;
-            let ex = node.tick(now).unwrap();
-            let t = Instant::now();
-            let acc = node.chain.svm.accounts();
-            for k in &ex.changed {
-                pending.insert(*k, acc.get(k).cloned());
-            }
-            if i % PER_ROOT == PER_ROOT - 1 {
-                tx.send(pending.drain().collect()).unwrap();
-            }
-            c.push(from(&ex.phases, ms(ex.phases.hash) + t.elapsed().as_secs_f64() * 1e3));
-        }
-        drop(tx);
-        let root_ms = worker.join().unwrap();
+        let (c, rc) = hybrid::<Merkle>(&mut node, &all, load);
+        drop(node);
+        let mut node = open(&cfg);
+        let (e, re) = hybrid::<smt::Sparse>(&mut node, &all, load);
+        peak_ram = peak_ram.max(rss_mb());
         drop(node);
         let p99 = |v: &[B]| pct(&v.iter().map(|x| x.total).collect::<Vec<_>>(), 0.99);
-        eprintln!("n={n} load={load}: p99 A {:.1} B {:.1} C {:.1} ms", p99(&a), p99(&b), p99(&c));
-        let all_over = p99(&a) >= LIMIT_MS && p99(&b) >= LIMIT_MS && p99(&c) >= LIMIT_MS;
-        steps.push(Step { load, a, b, c, root_ms });
+        eprintln!("n={n} load={load}: p99 {:.1} / {:.1} / {:.1} / {:.1} / {:.1} ms", p99(&a), p99(&b), p99(&c), p99(&d), p99(&e));
+        let v = [a, b, c, d, e];
+        let all_over = v.iter().all(|x| p99(x) >= LIMIT_MS);
+        steps.push(Step { load, v, root_ms: [rc, re] });
         if all_over {
             break;
         }
     }
 
-    // Per ogni variante: gradino più alto con p99 < 100 ms (carico sostenuto).
-    fn pick(s: &Step, v: usize) -> &Vec<B> {
-        match v {
-            0 => &s.a,
-            1 => &s.b,
-            _ => &s.c,
-        }
-    }
-    let names = ["LtHash", "Merkle", "ibrido"];
-    for v in 0..3 {
-        let ok = steps.iter().filter(|s| pct(&pick(s, v).iter().map(|x| x.total).collect::<Vec<_>>(), 0.99) < LIMIT_MS).last();
+    for v in 0..5 {
+        let ok = steps.iter().filter(|s| pct(&s.v[v].iter().map(|x| x.total).collect::<Vec<_>>(), 0.99) < LIMIT_MS).last();
         let Some(s) = ok else {
-            println!("| {n} | {} | < {} tx/blocco | | | | | | | | |", names[v], step_list[0]);
+            println!("| {n} | {} | < {} tx/blocco |", NAMES[v], step_list[0]);
             continue;
         };
-        let bl = pick(s, v);
+        let bl = &s.v[v];
         let tot: Vec<f64> = bl.iter().map(|x| x.total).collect();
         let mean = |f: fn(&B) -> f64| bl.iter().map(f).sum::<f64>() / bl.len() as f64;
-        let merkle = v > 0;
+        let (ram, build, proof) = match v {
+            0 => (format!("{base_ram}"), 0.0, "—".to_string()),
+            1 | 2 => (format!("{base_ram} + {mk_ram}"), mk_build, format!("{mk_proof} B, {mk_verify:.1} µs (no assenza)")),
+            _ => (format!("{base_ram} + {sp_ram}"), sp_build, format!("{sp_proof} B, {sp_verify:.1} µs; assenza {sp_absent} B, {sp_absent_us:.1} µs")),
+        };
         println!(
-            "| {n} | {} | {} | {} | {:.1} / {:.1} / {:.1} | {:.1} / {:.1} / {:.2} / {:.1} / {:.1} | {} | {snap_mb:.0} | {:.1} | {} |",
-            names[v],
+            "| {n} | {} | {} | {} | {:.1} / {:.1} / {:.1} | {:.1} / {:.1} / {:.2} / {:.1} / {:.1} | {ram} | {snap_mb:.0} | {:.1} | {proof} |",
+            NAMES[v],
             s.load,
             s.load * 10,
             pct(&tot, 0.5),
@@ -336,28 +406,15 @@ fn main() {
             mean(|x| x.sign),
             mean(|x| x.journal),
             mean(|x| x.other),
-            if merkle { format!("{base_ram} + {} (calcolati {mk_calc})", mk_ram) } else { format!("{base_ram}") },
-            restart_lt + if merkle { mk_build } else { 0.0 },
-            if merkle { format!("{proof_bytes} B, {verify_us:.1} µs") } else { "—".into() },
+            restart_lt + build,
         );
-        if v == 2 {
-            let r = &s.root_ms;
-            println!("ibrido: radice ogni secondo in {:.1} ms medi, max {:.1} ms (thread separato)", r.iter().sum::<f64>() / r.len() as f64, r.iter().cloned().fold(0.0, f64::max));
+        if v == 2 || v == 4 {
+            let r = &s.root_ms[(v - 2) / 2];
+            println!("{}: radice ogni secondo in {:.1} ms medi, max {:.1} ms (thread separato)", NAMES[v], r.iter().sum::<f64>() / r.len() as f64, r.iter().cloned().fold(0.0, f64::max));
         }
     }
-    // Picchi al carico più alto misurato: fasi del blocco più lento (LtHash).
-    let last = steps.last().unwrap();
-    let mut slow: Vec<(usize, B)> = last.a.iter().cloned().enumerate().collect();
-    slow.sort_by(|x, y| y.1.total.total_cmp(&x.1.total));
-    for (i, x) in slow.iter().take(4) {
-        println!(
-            "picco a {} tx/blocco: blocco {i} {:.0} ms = esecuzione {:.0} + hash {:.1} + firma {:.2} + journal {:.1} + altro {:.0}",
-            last.load, x.total, x.exec, x.hash, x.sign, x.journal, x.other
-        );
-    }
     println!("RAM di picco del processo: {peak_ram} MB");
-    // Riavvio dopo uno snapshot preso a fine corsa (stato cambiato dai blocchi): apertura
-    // del nodo (snapshot + LtHash completo) e costruzione dell'albero (Merkle, ibrido).
+    // Riavvio dopo uno snapshot preso a fine corsa: apertura e costruzione degli alberi.
     cfg.node.max_block_txs = step_list[0];
     let mut node = open(&cfg);
     let mut now = centrifuga::node::now_ms();
@@ -372,11 +429,13 @@ fn main() {
     let node = Node::open(cfg.clone(), kp()).unwrap();
     let reopen = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    let mk = Merkle::build(node.chain.svm.accounts());
-    let rebuild = t.elapsed().as_secs_f64();
+    drop(Merkle::build(node.chain.svm.accounts()));
+    let mk_re = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    drop(smt::Sparse::build(node.chain.svm.accounts()));
+    let sp_re = t.elapsed().as_secs_f64();
     println!(
-        "albero all'avvio (snapshot iniziale): apertura {restart_lt:.2} s + albero {mk_build:.2} s; dopo ripristino da snapshot all'altezza {}: apertura {reopen:.2} s + albero {rebuild:.2} s ({} account)",
-        node.chain.height,
-        mk.index.len()
+        "albero all'avvio (snapshot iniziale): apertura {restart_lt:.2} s, denso {mk_build:.2} s, sparso {sp_build:.2} s; dopo ripristino da snapshot all'altezza {}: apertura {reopen:.2} s, denso {mk_re:.2} s, sparso {sp_re:.2} s",
+        node.chain.height
     );
 }

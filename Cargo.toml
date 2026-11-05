@@ -55,3 +55,5 @@ blake3 = "1.8"
 [dev-dependencies]
 # Istruzioni del loader upgradeable per i test di deploy (già nel grafo di litesvm).
 solana-loader-v3-interface = { version = "8.1", features = ["wincode"] }
+# Solo per il confronto degli hash di stato (examples/compare.rs, tests/step10_state_roots.rs).
+sparse-merkle-tree = { version = "=0.6.1", features = ["trie"] }
