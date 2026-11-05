@@ -85,7 +85,9 @@ impl Merkle {
                 Some(i) => *i as usize,
                 None => {
                     let i = self.index.len();
-                    assert!(i < self.levels[0].len(), "prototipo: albero pieno");
+                    if i == self.levels[0].len() {
+                        self.grow();
+                    }
                     self.index.insert(*k, i as u32);
                     i
                 }
@@ -105,6 +107,18 @@ impl Merkle {
                 self.levels[l][i] = node_hash(&a, &b);
             }
         }
+    }
+
+    /// Albero pieno: raddoppia le foglie e ricalcola tutti i livelli (O(n), un picco).
+    fn grow(&mut self) {
+        let mut level = std::mem::take(&mut self.levels[0]);
+        level.resize(level.len() * 2, [0u8; 32]);
+        let mut levels = vec![level];
+        while levels.last().unwrap().len() > 1 {
+            let prev = levels.last().unwrap();
+            levels.push(prev.chunks(2).map(|p| node_hash(&p[0], &p[1])).collect());
+        }
+        self.levels = levels;
     }
 
     /// Prova: indice e fratelli lungo il percorso (32 byte per livello).
