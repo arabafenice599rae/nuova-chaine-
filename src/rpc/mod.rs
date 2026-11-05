@@ -52,6 +52,21 @@ pub struct Gateway {
     pub events: broadcast::Sender<Arc<BlockEvent>>,
     /// Log dei metodi ricevuti (per scoprire cosa chiedono i wallet): `rpc.log`.
     pub log: Option<Arc<Mutex<File>>>,
+    /// Indexer dello storico (URL http): il nodo gli inoltra le richieste sullo storico.
+    pub indexer: Option<String>,
+}
+
+/// POST JSON-RPC verso l'indexer (http://host:porta), sui thread di rete: il thread del
+/// nodo non aspetta mai l'indexer.
+async fn forward(url: &str, req: &Value) -> Result<Value, String> {
+    let host = url.strip_prefix("http://").ok_or("indexer_rpc: solo http://")?.trim_end_matches('/');
+    let s = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(host)).await.map_err(|_| "timeout")?.map_err(|e| e.to_string())?;
+    let (mut tx, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(s)).await.map_err(|e| e.to_string())?;
+    tokio::spawn(conn);
+    let r = Request::post("/").header("host", host).header("content-type", "application/json").body(Full::new(Bytes::from(req.to_string()))).unwrap();
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), tx.send_request(r)).await.map_err(|_| "timeout")?.map_err(|e| e.to_string())?;
+    let body = resp.into_body().collect().await.map_err(|e| e.to_string())?.to_bytes();
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
 }
 
 /// Esito di una risposta JSON-RPC per il log.
@@ -83,6 +98,43 @@ impl Gateway {
         let Some(method) = req["method"].as_str().map(str::to_owned) else {
             return json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "Invalid request"}});
         };
+        let resp = self.call_node(&req, &method, id.clone(), peer, arrived).await;
+        let Some(ix) = &self.indexer else { return resp };
+        // Storico: la cronologia sempre dall'indexer; tx e stati non più nella finestra.
+        let history = req["params"][1]["searchTransactionHistory"].as_bool() == Some(true);
+        let missing = match method.as_str() {
+            "getSignaturesForAddress" => true,
+            "getTransaction" => resp["result"].is_null() && resp.get("error").is_none(),
+            "getSignatureStatuses" => history && resp["result"]["value"].as_array().is_some_and(|v| v.iter().any(Value::is_null)),
+            _ => false,
+        };
+        if !missing {
+            return resp;
+        }
+        let from_ix = forward(ix, &req).await;
+        self.log("indexer", &method, if from_ix.is_ok() { "ok" } else { "irraggiungibile" });
+        match (method.as_str(), from_ix) {
+            ("getSignatureStatuses", Ok(v)) => {
+                let mut resp = resp;
+                if let (Some(mine), Some(theirs)) = (resp["result"]["value"].as_array_mut(), v["result"]["value"].as_array()) {
+                    for (m, t) in mine.iter_mut().zip(theirs) {
+                        if m.is_null() {
+                            *m = t.clone();
+                        }
+                    }
+                }
+                resp
+            }
+            (_, Ok(mut v)) => {
+                v["id"] = id;
+                v
+            }
+            (_, Err(e)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": methods::NO_HISTORY, "message": format!("transaction history temporarily unavailable: indexer unreachable ({e})")}}),
+        }
+    }
+
+    async fn call_node(&self, req: &Value, method: &str, id: Value, peer: Option<IpAddr>, arrived: Instant) -> Value {
+        let method = method.to_string();
         let params = req.get("params").cloned().unwrap_or(json!([]));
         let m = method.clone();
         let resp = match self.query(move |n| methods::call(n, &m, &params, peer, arrived)).await {

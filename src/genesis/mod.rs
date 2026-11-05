@@ -53,6 +53,8 @@ pub fn vault_data(kind: u8, beneficiary: &Address, authority: &Address, total: u
 pub struct Config {
     pub node: NodeConfig,
     pub genesis: GenesisConfig,
+    #[serde(default)]
+    pub indexer: Option<IndexerConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -78,9 +80,33 @@ pub struct NodeConfig {
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
-    /// Tx tenute in RAM per stati e getTransaction; le altre si leggono dallo storico su disco.
+    /// Tx recenti in RAM per getTransaction (gli stati coprono sempre la finestra dei blockhash).
     #[serde(default = "default_rpc_recent_txs")]
     pub rpc_recent_txs: usize,
+    /// Indexer dello storico (es. "http://127.0.0.1:8903"): getSignaturesForAddress e le tx
+    /// più vecchie vanno lì. Senza, il nodo risponde che lo storico non è disponibile.
+    #[serde(default)]
+    pub indexer_rpc: Option<String>,
+}
+
+/// `centrifuga indexer`: processo separato che legge il journal del nodo, riesegue i
+/// blocchi e serve lo storico. Il nodo non dipende da lui.
+#[derive(Clone, Debug, Deserialize)]
+pub struct IndexerConfig {
+    pub data_dir: PathBuf,
+    pub rpc_addr: String,
+    /// "segments" (default), "pages" o "redb" (solo con la feature redb-archive).
+    #[serde(default = "default_storage")]
+    pub storage: String,
+    /// Blocchi da conservare (0 = tutti).
+    #[serde(default)]
+    pub retention_blocks: u64,
+    /// Tx per segmento (archivio "segments").
+    #[serde(default = "default_segment_txs")]
+    pub segment_txs: u64,
+    /// Checkpoint dell'archivio e snapshot dello stato dell'indexer, in blocchi.
+    #[serde(default = "default_indexer_snapshot")]
+    pub snapshot_every: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -275,5 +301,17 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
 }
 
 fn default_rpc_recent_txs() -> usize {
-    100_000
+    20_000
+}
+
+fn default_storage() -> String {
+    "segments".into()
+}
+
+fn default_segment_txs() -> u64 {
+    1_000_000
+}
+
+fn default_indexer_snapshot() -> u64 {
+    3_000
 }

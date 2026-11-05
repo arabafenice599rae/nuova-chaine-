@@ -13,7 +13,8 @@ stream_max_lag_blocks = 600     # client indietro di più di 60 s: disconnesso
 stream_catchup_blocks = 36000   # riconnessione con from_height: delta fino a 1 ora
 ingress_tps_per_ip = 50
 ingress_pending_per_payer = 64
-rpc_recent_txs = 100000         # tx in RAM per RPC; lo storico completo è su disco (txlog.bin)
+rpc_recent_txs = 20000          # tx recenti in RAM per getTransaction; lo storico è dell'indexer
+# indexer_rpc = "http://127.0.0.1:8903"   # storico: getSignaturesForAddress e tx vecchie
 
 [genesis]
 network = "mainnet"             # "devnet" per ammettere [[genesis.prefund]]
@@ -41,3 +42,13 @@ claims_end_height = 708480000         # 24 mesi + 90 giorni: poi airdrop -> rese
 # [[genesis.prefund]]
 # pubkey = "..."
 # lamports = 1000000000
+
+# Indexer dello storico (processo separato: `centrifuga indexer <config>`). Facoltativo:
+# il nodo produce blocchi anche con l'indexer spento o in ritardo.
+# [indexer]
+# data_dir = "./data-indexer"
+# rpc_addr = "127.0.0.1:8903"
+# storage = "segments"        # segments | pages | redb (feature redb-archive)
+# retention_blocks = 0        # 0 = tutto; es. 864000 = un giorno a 100 ms
+# segment_txs = 1000000
+# snapshot_every = 3000

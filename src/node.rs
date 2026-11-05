@@ -47,24 +47,13 @@ impl Node {
         }
         let dir = cfg.node.data_dir.clone();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let snap = ledger::read_snapshot(&dir).map_err(|e| e.to_string())?;
-        let snap_height = snap.as_ref().map_or(0, |s| s.height);
-        let mut chain = match snap {
-            None => genesis::build(&cfg.genesis)?.0,
-            Some(s) => {
-                // Lo snapshot deve appartenere a questo genesis (parametri inclusi nel suo hash).
-                let expected = genesis::build(&cfg.genesis)?.0.genesis_hash;
-                if s.genesis_hash != expected {
-                    return Err(format!("snapshot of another genesis ({} instead of {expected})", s.genesis_hash));
-                }
-                let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
-                // La finestra parte dal genesis; il journal fino a `snap_height` la riempie.
-                Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash)
-            }
-        };
-        let mut index = TxIndex::open(&dir, cfg.node.rpc_recent_txs)?;
-        // Firme della finestra anti-duplicati: dimensionata subito (nessun ridimensionamento).
-        chain.reserve_signatures(chain.params.blockhash_window as usize * cfg.node.max_block_txs);
+        let (mut chain, snap_height) = chain_from_snapshot(&cfg, &dir)?;
+        // Finestre in RAM dimensionate subito (nessun ridimensionamento): firme della
+        // finestra anti-duplicati e stati delle tx degli stessi blocchi.
+        let window = chain.params.blockhash_window as usize * cfg.node.max_block_txs;
+        chain.reserve_signatures(window);
+        let mut index = TxIndex::new(chain.params.blockhash_window as u64, cfg.node.rpc_recent_txs, window);
+        index.load(&dir, snap_height).map_err(|e| format!("status.bin: {e}"))?;
         let mut recent = VecDeque::new();
         let window = cfg.node.stream_catchup_blocks;
         let mut last_offset = None;
@@ -80,7 +69,7 @@ impl Node {
                 chain.note_block(&b)
             } else {
                 let ex = chain.apply(&b)?;
-                index.record(&ex, |_| None)?;
+                index.record(&ex, |_| None);
                 remember(&mut recent, window, b.header.height, offset, &ex);
                 Ok(())
             }
@@ -109,7 +98,7 @@ impl Node {
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
         let arrivals = &mut self.arrivals;
         let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
-        self.index.record(&ex, |s| us.get(s).copied())?;
+        self.index.record(&ex, |s| us.get(s).copied());
         if self.arrivals.len() > 100_000 {
             self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
         }
@@ -159,8 +148,8 @@ impl Node {
     }
 
     pub fn snapshot(&mut self) -> Result<(), String> {
-        // Prima lo storico su disco: dopo un riavvio le tx fino allo snapshot ci sono già.
-        self.index.checkpoint()?;
+        // Prima gli stati della finestra (non lo storico), poi lo snapshot della stessa altezza.
+        self.index.save(&self.dir, self.chain.height).map_err(|e| format!("status.bin: {e}"))?;
         let c = &self.chain;
         ledger::write_snapshot(&self.dir, c.height, c.genesis_hash, c.svm.accounts().iter()).map_err(|e| format!("snapshot: {e}"))
     }
@@ -173,12 +162,30 @@ pub struct Running {
     pub cfg: Config,
 }
 
+/// Stato da `dir/snapshot.bin` (o dal genesis se manca) e altezza dello snapshot: la
+/// finestra dei blockhash si riempie poi con il journal fino a quell'altezza.
+pub fn chain_from_snapshot(cfg: &Config, dir: &std::path::Path) -> Result<(Chain, u64), String> {
+    let params = cfg.genesis.params()?;
+    let Some(s) = ledger::read_snapshot(dir).map_err(|e| e.to_string())? else {
+        return Ok((genesis::build(&cfg.genesis)?.0, 0));
+    };
+    // Lo snapshot deve appartenere a questo genesis (parametri inclusi nel suo hash).
+    let expected = genesis::build(&cfg.genesis)?.0.genesis_hash;
+    if s.genesis_hash != expected {
+        return Err(format!("snapshot of another genesis ({} instead of {expected})", s.genesis_hash));
+    }
+    let height = s.height;
+    let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
+    Ok((Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash), height))
+}
+
 /// Apre il nodo su un thread dedicato (litesvm vive lì) e restituisce i canali.
 pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
     use crate::rpc::{BlockEvent, Gateway};
     let (qtx, qrx) = std::sync::mpsc::channel::<Query>();
     let (events, _) = tokio::sync::broadcast::channel(1024);
     let (blocks, _) = tokio::sync::broadcast::channel(cfg.node.stream_max_lag_blocks.max(1));
+    let running_indexer = cfg.node.indexer_rpc.clone();
     let log = if cfg.node.rpc_log {
         std::fs::create_dir_all(&cfg.node.data_dir).map_err(|e| e.to_string())?;
         let path = cfg.node.data_dir.join("rpc.log");
@@ -188,7 +195,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         None
     };
     let running = Running {
-        gateway: Gateway { queries: qtx.clone(), events: events.clone(), log },
+        gateway: Gateway { queries: qtx.clone(), events: events.clone(), log, indexer: running_indexer },
         stream: crate::stream::Stream {
             queries: qtx,
             blocks: blocks.clone(),

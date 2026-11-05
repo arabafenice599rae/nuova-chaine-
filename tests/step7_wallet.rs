@@ -132,6 +132,17 @@ async fn wallet_against_devnet_node() {
     c.node.data_dir = dir.join("node");
     c.node.rpc_addr = "127.0.0.1:19170".into();
     c.node.stream_addr = "127.0.0.1:19172".into();
+    // Storico: indexer configurato ma spento all'inizio (il nodo produce blocchi lo stesso).
+    c.node.indexer_rpc = Some("http://127.0.0.1:19174".into());
+    c.indexer = Some(centrifuga::genesis::IndexerConfig {
+        data_dir: dir.join("indexer"),
+        rpc_addr: "127.0.0.1:19174".into(),
+        storage: "segments".into(),
+        retention_blocks: 0,
+        segment_txs: 1_000,
+        snapshot_every: 50,
+    });
+    let indexer_cfg = c.clone();
     let hash = genesis::build(&c.genesis).unwrap().0.genesis_hash.to_string();
     let running = node::start(c, Keypair::try_from(op.to_bytes().as_slice()).unwrap()).unwrap();
     tokio::spawn(running.serve_network());
@@ -194,8 +205,20 @@ async fn wallet_against_devnet_node() {
         let o = wallet(&dir, &["token-send", &mint.to_string(), &to, "0.0000001", "--yes"], "", &mut seen);
         assert!(!o.ok && o.text.contains("invalid amount"), "più decimali del mint: {}", o.text);
 
-        // Cronologia: 2 invii CnFA, mint, 2 invii SPL.
+        // Cronologia con l'indexer spento: errore chiaro, nessun "SOL".
         let o = wallet(&dir, &["history"], "", &mut seen);
+        assert!(!o.ok && o.text.contains("history not available on this node") && o.text.contains("indexer unreachable"), "{}", o.text);
+        // Indexer acceso: legge il journal del nodo e recupera da solo.
+        std::thread::spawn(move || centrifuga::indexer::run(indexer_cfg));
+        let start = std::time::Instant::now();
+        let o = loop {
+            let o = wallet(&dir, &["history"], "", &mut seen);
+            if o.ok && o.text.lines().count() >= 5 || start.elapsed() > std::time::Duration::from_secs(20) {
+                break o;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        };
+        // Cronologia: 2 invii CnFA, mint, 2 invii SPL.
         assert_eq!(o.text.lines().filter(|l| l.starts_with("block ") && l.ends_with("ok")).count(), 5, "{}", o.text);
         assert_eq!(wallet(&dir, &["history", &Address::new_unique().to_string()], "", &mut seen).text, "no transactions\n");
 

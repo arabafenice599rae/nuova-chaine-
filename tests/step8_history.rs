@@ -1,14 +1,15 @@
-//! Storico delle tx: in RAM solo una finestra, il resto su disco. getTransaction e
-//! getSignaturesForAddress restano corretti per le tx uscite dalla finestra, dopo un
-//! riavvio (snapshot + journal, solo journal), dopo un arresto a metà scrittura e dopo
-//! la ricostruzione dell'indice delle firme.
+//! Nodo e storico separati. Il nodo tiene in RAM solo gli stati della finestra dei
+//! blockhash e le ultime tx; lo storico è dell'indexer, che legge il journal e
+//! riesegue. Il nodo funziona con l'indexer spento; l'indexer recupera da solo e dà
+//! le stesse risposte del nodo, anche dopo riavvii, arresti a metà e conservazione.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use centrifuga::genesis::{Config, LAMPORTS_PER_CNFA, Prefund, transfer_tx};
+use centrifuga::genesis::{Config, IndexerConfig, LAMPORTS_PER_CNFA, Prefund, transfer_tx};
+use centrifuga::indexer::{self, Indexer};
 use centrifuga::node::Node;
-use centrifuga::rpc::methods::call;
+use centrifuga::rpc::methods::{self, call};
 use serde_json::{Value, json};
 use solana_address::Address;
 use solana_keypair::Keypair;
@@ -17,133 +18,147 @@ use solana_signer::Signer;
 
 const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 
-fn rpc(n: &mut Node, m: &str, p: Value) -> Value {
-    call(n, m, &p, None, Instant::now()).map_err(|e| e.message).unwrap()
+fn rpc(n: &mut Node, m: &str, p: Value) -> Result<Value, methods::RpcError> {
+    call(n, m, &p, None, Instant::now())
 }
 
-fn history(n: &mut Node, a: &Address, extra: Value) -> Vec<String> {
-    let mut cfg = json!({"limit": 1000});
-    if let Value::Object(m) = extra {
-        cfg.as_object_mut().unwrap().extend(m);
-    }
-    rpc(n, "getSignaturesForAddress", json!([a.to_string(), cfg])).as_array().unwrap().iter().map(|r| r["signature"].as_str().unwrap().to_string()).collect()
+struct Run {
+    cfg: Config,
+    op: Keypair,
+    /// (firma, getTransaction quando era ancora nel nodo), in ordine di esecuzione.
+    seen: Vec<(Signature, Value)>,
+    a_sigs: Vec<String>,
+    to_sigs: Vec<String>,
+    a: Address,
+    to: Address,
 }
 
-#[test]
-fn history_beyond_ram_window_and_restarts() {
+/// Nodo con finestra degli stati di 20 blocchi e 5 tx in RAM; 30 blocchi da 3 tx.
+fn run(name: &str, storage: &str) -> Run {
     let (op, a, b) = (Keypair::new(), Keypair::new(), Keypair::new());
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.operator = op.pubkey().to_string();
     cfg.genesis.network = "devnet".into();
     cfg.genesis.chain_id = "centrifuga:devnet".into();
+    cfg.genesis.blockhash_window = 20;
     for k in [&a, &b] {
         cfg.genesis.prefund.push(Prefund { pubkey: k.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
     }
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("history");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
-    cfg.node.data_dir = dir.clone();
+    cfg.node.data_dir = dir.join("node");
     cfg.node.snapshot_every = 7;
-    cfg.node.rpc_recent_txs = 5; // finestra minuscola: quasi tutto dal disco
-    let kp = || Keypair::try_from(op.to_bytes().as_slice()).unwrap();
-    let mut n = Node::open(cfg.clone(), kp()).unwrap();
-    let t0 = cfg.genesis.timestamp_ms;
+    cfg.node.rpc_recent_txs = 5;
+    cfg.indexer = Some(IndexerConfig { data_dir: dir.join("indexer"), rpc_addr: "127.0.0.1:0".into(), storage: storage.into(), retention_blocks: 0, segment_txs: 10, snapshot_every: 9 });
+    let mut n = Node::open(cfg.clone(), Keypair::try_from(op.to_bytes().as_slice()).unwrap()).unwrap();
     let to = Address::new_unique();
-    // (firma, getTransaction mentre è ancora in RAM), in ordine di esecuzione.
-    let mut seen: Vec<(Signature, Value)> = vec![];
-    let mut a_sigs = vec![];
-    for i in 1..=20u64 {
+    let (mut seen, mut a_sigs) = (vec![], vec![]);
+    for i in 1..=30u64 {
         let txs: Vec<_> = (0..3).map(|j| transfer_tx(if j == 2 { &b } else { &a }, &to, 1_000 * i + j, n.chain.last_hash)).collect();
         n.ingress.submit(None, txs.clone());
-        let ex = n.tick(t0 + i * 100).unwrap();
-        assert_eq!(ex.block.txs.len(), 3);
+        assert_eq!(n.tick(cfg.genesis.timestamp_ms + i * 100).unwrap().block.txs.len(), 3);
         for t in &txs {
             let s = t.signatures[0];
-            seen.push((s, rpc(&mut n, "getTransaction", json!([s.to_string()]))));
+            seen.push((s, rpc(&mut n, "getTransaction", json!([s.to_string()])).unwrap()));
             if t.message.static_account_keys()[0] == a.pubkey() {
                 a_sigs.push(s.to_string());
             }
         }
-        assert!(n.index.recent_len() <= 5, "RAM limitata alla finestra");
+        assert!(n.index.recent_len() <= 5, "tx in RAM limitate");
+        assert!(n.index.statuses_len() <= 21 * 3, "stati limitati alla finestra");
     }
-    a_sigs.reverse(); // dalla più recente
-    let mut all_to: Vec<String> = seen.iter().map(|(s, _)| s.to_string()).collect();
-    all_to.reverse();
-
-    let last = seen.last().unwrap().0.to_string();
-    let check = |n: &mut Node, what: &str| {
-        // L'ultima tx è nella finestra in RAM anche dopo un riavvio (conferma dei wallet).
-        assert_eq!(rpc(n, "getSignatureStatuses", json!([[last]]))["value"][0]["slot"], 20, "{what}: stato recente");
-        for (s, expected) in &seen {
-            assert_eq!(&rpc(n, "getTransaction", json!([s.to_string()])), expected, "{what}: getTransaction {s}");
-        }
-        assert_eq!(history(n, &a.pubkey(), json!({})), a_sigs, "{what}: cronologia di a");
-        assert_eq!(history(n, &to, json!({})), all_to, "{what}: cronologia del destinatario");
-        assert_eq!(history(n, &to, json!({"limit": 4})), all_to[..4], "{what}: limit");
-        assert_eq!(history(n, &to, json!({"before": all_to[10], "until": all_to[20]})), all_to[11..20], "{what}: before/until");
-        // Stati: una tx vecchia è nota solo con searchTransactionHistory, come in Agave.
-        let old = seen[0].0.to_string();
-        assert!(rpc(n, "getSignatureStatuses", json!([[old]]))["value"][0].is_null(), "{what}");
-        let st = rpc(n, "getSignatureStatuses", json!([[old], {"searchTransactionHistory": true}]));
-        assert_eq!(st["value"][0]["slot"], 1, "{what}");
-        assert_eq!(rpc(n, "getEpochInfo", json!([]))["transactionCount"], 60, "{what}: nessun duplicato");
-    };
-    check(&mut n, "in esecuzione");
-    drop(n);
-
-    // Riavvio da snapshot (altezza 14) + journal.
-    let mut n = Node::open(cfg.clone(), kp()).unwrap();
-    check(&mut n, "riavvio da snapshot");
-    drop(n);
-    // Riavvio dal solo journal.
-    std::fs::remove_file(dir.join("snapshot.bin")).unwrap();
-    let mut n = Node::open(cfg.clone(), kp()).unwrap();
-    check(&mut n, "riavvio dal journal");
-    drop(n);
-    // Arresto a metà scrittura dell'ultimo blocco del registro: si tronca e si riregistra
-    // dal journal.
-    let log = dir.join("txlog.bin");
-    let len = std::fs::metadata(&log).unwrap().len();
-    std::fs::OpenOptions::new().write(true).open(&log).unwrap().set_len(len - 10).unwrap();
-    let mut n = Node::open(cfg.clone(), kp()).unwrap();
-    assert_eq!(std::fs::metadata(&log).unwrap().len(), len, "blocco troncato e riscritto");
-    check(&mut n, "dopo un arresto a metà scrittura");
-    drop(n);
-    // Indice delle firme perso: si ricostruisce dal registro.
-    std::fs::remove_file(dir.join("txsig.idx")).unwrap();
-    let mut n = Node::open(cfg, kp()).unwrap();
-    check(&mut n, "indice ricostruito");
+    a_sigs.reverse();
+    let mut to_sigs: Vec<String> = seen.iter().map(|(s, _)| s.to_string()).collect();
+    to_sigs.reverse();
+    Run { cfg, op, seen, a_sigs, to_sigs, a: a.pubkey(), to }
 }
 
 #[test]
-fn signature_index_grows_without_pauses_and_finds_everything() {
-    // Molte firme: l'hash lineare si divide un secchio alla volta.
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("history_big");
-    let _ = std::fs::remove_dir_all(&dir);
-    let (op, a) = (Keypair::new(), Keypair::new());
-    let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
-    cfg.genesis.operator = op.pubkey().to_string();
-    cfg.genesis.network = "devnet".into();
-    cfg.genesis.chain_id = "centrifuga:devnet".into();
-    cfg.genesis.prefund.push(Prefund { pubkey: a.pubkey().to_string(), lamports: 1_000 * LAMPORTS_PER_CNFA });
-    cfg.node.data_dir = dir;
-    cfg.node.snapshot_every = 0;
-    cfg.node.rpc_recent_txs = 0;
-    cfg.node.ingress_pending_per_payer = u32::MAX;
-    let mut n = Node::open(cfg.clone(), Keypair::try_from(op.to_bytes().as_slice()).unwrap()).unwrap();
-    let mut sigs = vec![];
-    let mut worst = 0f64;
-    for i in 1..=40u64 {
-        let txs: Vec<_> = (0..2_500u64).map(|j| transfer_tx(&a, &Address::new_from_array([(j % 251) as u8 + 1; 32]), i * 10_000 + j, n.chain.last_hash)).collect();
-        sigs.extend(txs.iter().map(|t| t.signatures[0]));
-        n.ingress.submit(None, txs);
-        let t = Instant::now();
-        n.tick(cfg.genesis.timestamp_ms + i * 100).unwrap();
-        worst = worst.max(t.elapsed().as_secs_f64());
-    }
-    // 100.000 firme, molti split: tutte ritrovabili dal disco.
-    for s in sigs.iter().step_by(97) {
-        assert_eq!(n.index.get(s).unwrap().tx.signatures[0], *s);
-    }
-    assert!(n.index.get(&Signature::from([7u8; 64])).is_none());
-    assert!(worst < 2.0, "blocco più lento {worst:.2} s");
+fn node_keeps_only_a_bounded_window() {
+    let r = run("history_node", "segments");
+    let mut n = Node::open(r.cfg.clone(), Keypair::try_from(r.op.to_bytes().as_slice()).unwrap()).unwrap();
+    let check = |n: &mut Node, what: &str| {
+        let (old, last) = (r.seen[0].0.to_string(), r.seen.last().unwrap().0.to_string());
+        let st = rpc(n, "getSignatureStatuses", json!([[old, last]])).unwrap();
+        assert!(st["value"][0].is_null(), "{what}: stato fuori dalla finestra");
+        assert_eq!(st["value"][1]["slot"], 30, "{what}: stato recente");
+        assert!(rpc(n, "getTransaction", json!([r.seen[0].0.to_string()])).unwrap().is_null(), "{what}: tx vecchia non nel nodo");
+        let e = rpc(n, "getSignaturesForAddress", json!([r.to.to_string()])).unwrap_err();
+        assert_eq!(e.code, methods::NO_HISTORY, "{what}");
+        assert!(e.message.contains("no indexer"), "{what}: {}", e.message);
+        assert_eq!(rpc(n, "getEpochInfo", json!([])).unwrap()["transactionCount"], 90, "{what}");
+    };
+    check(&mut n, "dopo il riavvio da snapshot (stati da status.bin)");
+    // Il nodo non scrive lo storico sul proprio disco.
+    let files: Vec<String> = std::fs::read_dir(&r.cfg.node.data_dir).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+    assert!(files.iter().all(|f| ["journal.bin", "snapshot.bin", "status.bin"].contains(&f.as_str())), "{files:?}");
+}
+
+fn ix_call(ix: &Indexer, m: &str, p: Value) -> Value {
+    indexer::call(ix.archive.lock().unwrap().as_ref(), &json!({"jsonrpc": "2.0", "id": 1, "method": m, "params": p}))["result"].clone()
+}
+
+fn history(ix: &Indexer, a: &Address, cfg: Value) -> Vec<String> {
+    ix_call(ix, "getSignaturesForAddress", json!([a.to_string(), cfg])).as_array().unwrap().iter().map(|x| x["signature"].as_str().unwrap().to_string()).collect()
+}
+
+fn indexer_matches_node(storage: &str) {
+    let r = run(&format!("history_ix_{storage}"), storage);
+    let journal = r.cfg.node.data_dir.join("journal.bin");
+    let check = |ix: &Indexer, what: &str| {
+        for (s, expected) in &r.seen {
+            assert_eq!(&ix_call(ix, "getTransaction", json!([s.to_string()])), expected, "{storage} {what}: {s}");
+        }
+        assert_eq!(history(ix, &r.a, json!({})), r.a_sigs, "{storage} {what}");
+        assert_eq!(history(ix, &r.to, json!({})), r.to_sigs, "{storage} {what}");
+        assert_eq!(history(ix, &r.to, json!({"limit": 4})), r.to_sigs[..4], "{storage} {what}");
+        assert_eq!(history(ix, &r.to, json!({"before": r.to_sigs[10], "until": r.to_sigs[20]})), r.to_sigs[11..20], "{storage} {what}");
+        let st = ix_call(ix, "getSignatureStatuses", json!([[r.seen[0].0.to_string()]]));
+        assert_eq!(st["value"][0]["slot"], 1, "{storage} {what}");
+    };
+    // L'indexer parte dopo il nodo (era "spento") e recupera dal journal.
+    let ix = Indexer::open(&r.cfg, &journal).unwrap();
+    assert_eq!(ix.chain.height, 30);
+    check(&ix, "recupero");
+    drop(ix);
+    // Riavvio dell'indexer (dal suo snapshot + journal): nessun duplicato.
+    let ix = Indexer::open(&r.cfg, &journal).unwrap();
+    check(&ix, "riavvio");
+    drop(ix);
+    // Arresto a metà scrittura: coda dell'archivio troncata, poi riregistrata.
+    let arch = r.cfg.indexer.as_ref().unwrap().data_dir.join("archive");
+    let last = std::fs::read_dir(&arch).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log" || x == "bin" || x == "redb")).max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
+    let len = std::fs::metadata(&last).unwrap().len();
+    std::fs::OpenOptions::new().write(true).open(&last).unwrap().set_len(len.saturating_sub(10)).unwrap();
+    let ix = Indexer::open(&r.cfg, &journal).unwrap();
+    check(&ix, "dopo un arresto a metà");
+}
+
+#[test]
+fn indexer_segments_matches_node() {
+    indexer_matches_node("segments");
+}
+
+#[test]
+fn indexer_pages_matches_node() {
+    indexer_matches_node("pages");
+}
+
+#[cfg(feature = "redb-archive")]
+#[test]
+fn indexer_redb_matches_node() {
+    indexer_matches_node("redb");
+}
+
+#[test]
+fn retention_drops_old_segments_only() {
+    let mut r = run("history_retention", "segments");
+    r.cfg.indexer.as_mut().unwrap().retention_blocks = 10;
+    let ix = Indexer::open(&r.cfg, &r.cfg.node.data_dir.join("journal.bin")).unwrap();
+    // Con altezze < 1000 la conservazione non scatta da sola: si applica a mano.
+    ix.archive.lock().unwrap().prune(20).unwrap();
+    assert!(ix_call(&ix, "getTransaction", json!([r.seen[0].0.to_string()])).is_null(), "vecchia eliminata");
+    let last = r.seen.last().unwrap();
+    assert_eq!(&ix_call(&ix, "getTransaction", json!([last.0.to_string()])), &last.1, "recente conservata");
+    let _ = Path::new("");
 }

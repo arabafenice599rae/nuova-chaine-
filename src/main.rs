@@ -6,6 +6,7 @@ use centrifuga::node::{fmt_amount, read_keypair};
 const USAGE: &str = "usage: centrifuga genesis|run [config.toml]
      centrifuga balance <pubkey> [rpc_url]          (default http://127.0.0.1:8899)
      centrifuga wallet <new|address|balance|send|token-send|history> ...
+     centrifuga indexer [config.toml]                (storico: legge il journal del nodo)
      centrifuga eligible <config.toml> <airdrop_list.txt> <output.txt>";
 
 fn main() {
@@ -16,6 +17,7 @@ fn main() {
         Some("run") => cmd_run(Path::new(&arg(2, "centrifuga.toml"))),
         Some("balance") if args.len() >= 3 => cmd_balance(&args[2], &arg(3, "http://127.0.0.1:8899")),
         Some("wallet") => centrifuga::wallet::main(&args[2..]),
+        Some("indexer") => Config::load(Path::new(&arg(2, "centrifuga.toml"))).and_then(centrifuga::indexer::run),
         Some("eligible") if args.len() == 5 => cmd_eligible(&PathBuf::from(&args[2]), &args[3], &args[4]),
         _ => Err(USAGE.to_string()),
     };

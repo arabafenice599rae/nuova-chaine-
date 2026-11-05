@@ -37,6 +37,7 @@ pub fn chain_info(n: &Node) -> Value {
     })
 }
 
+#[derive(Debug)]
 pub struct RpcError {
     pub code: i64,
     pub message: String,
@@ -105,15 +106,32 @@ fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     }
 }
 
-fn status(r: &TxRecord) -> Value {
-    let status = match r.err() {
+pub fn status(slot: u64, err: Option<&solana_transaction::TransactionError>) -> Value {
+    let status = match err {
         Some(e) => json!({"Err": e}),
         None => json!({"Ok": null}),
     };
-    json!({"slot": r.slot, "confirmations": null, "err": r.err(), "status": status, "confirmationStatus": "finalized"})
+    json!({"slot": slot, "confirmations": null, "err": err, "status": status, "confirmationStatus": "finalized"})
 }
 
-fn transaction(r: &TxRecord, c: &Value) -> Value {
+/// Errore per lo storico assente (codice proprio, il wallet lo riconosce).
+pub const NO_HISTORY: i64 = -32011;
+
+pub fn history_json(list: Vec<crate::archive::HistoryEntry>) -> Value {
+    json!(list.into_iter().map(|r| json!({
+        "signature": r.sig.to_string(), "slot": r.slot, "err": r.err, "memo": null,
+        "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
+    })).collect::<Vec<_>>())
+}
+
+/// (limit, before, until) di getSignaturesForAddress.
+pub fn history_args(p: &Value) -> Result<(usize, Option<Signature>, Option<Signature>), RpcError> {
+    let c = cfg(p, 1);
+    let limit = c["limit"].as_u64().unwrap_or(1000).min(1000) as usize;
+    Ok((limit, c["before"].as_str().map(sig).transpose()?, c["until"].as_str().map(sig).transpose()?))
+}
+
+pub fn transaction(r: &TxRecord, c: &Value) -> Value {
     let tx = match c["encoding"].as_str() {
         Some("base64") => json!([b64(crate::ledger::block::tx_bytes(&r.tx)), "base64"]),
         Some("base58") => json!([b58(crate::ledger::block::tx_bytes(&r.tx)), "base58"]),
@@ -251,37 +269,24 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             return Err(RpcError { code: -32003, message: message.into(), data: Value::Null });
         }
         "getSignatureStatuses" => {
+            // Finestra dei blockhash; con searchTransactionHistory il gateway completa i
+            // mancanti dall'indexer, se c'è.
             let sigs: Vec<String> = arg(p, 0)?;
-            // Come Agave: lo storico su disco solo con searchTransactionHistory.
-            let history = cfg(p, 1)["searchTransactionHistory"].as_bool() == Some(true);
-            let v = sigs
-                .iter()
-                .map(|s| {
-                    let s = sig(s)?;
-                    Ok(match n.index.recent(&s) {
-                        Some(r) => Some(status(r)),
-                        None if history => n.index.get(&s).map(|r| status(&r)),
-                        None => None,
-                    })
-                })
-                .collect::<Result<Vec<_>, RpcError>>()?;
+            let v = sigs.iter().map(|s| Ok(n.index.status(&sig(s)?).map(|(slot, err)| status(*slot, err.as_ref())))).collect::<Result<Vec<_>, RpcError>>()?;
             ctx(n, json!(v))
         }
         "getTransaction" => {
             let s = sig(&arg::<String>(p, 0)?)?;
-            n.index.get(&s).map_or(Value::Null, |r| transaction(&r, cfg(p, 1)))
+            n.index.get(&s).map_or(Value::Null, |r| transaction(r, cfg(p, 1)))
         }
         "getSignaturesForAddress" => {
-            let a = addr(p, 0)?;
-            let c = cfg(p, 1);
-            let limit = c["limit"].as_u64().unwrap_or(1000).min(1000) as usize;
-            let before = c["before"].as_str().map(sig).transpose()?;
-            let until = c["until"].as_str().map(sig).transpose()?;
-            let out: Vec<Value> = n.index.history(&a, before, until, limit).into_iter().map(|r| json!({
-                "signature": r.sig.to_string(), "slot": r.slot, "err": r.err, "memo": null,
-                "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
-            })).collect();
-            json!(out)
+            // Con un indexer configurato la richiesta non arriva qui (la inoltra il gateway).
+            addr(p, 0)?;
+            return Err(RpcError {
+                code: NO_HISTORY,
+                message: "transaction history not available: this node keeps only recent transactions and has no indexer (indexer_rpc)".into(),
+                data: Value::Null,
+            });
         }
         _ => {
             return Err(RpcError { code: -32601, message: "Method not found".into(), data: Value::Null });
