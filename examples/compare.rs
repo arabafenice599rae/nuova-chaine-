@@ -4,7 +4,9 @@
 //!   B. Merkle incrementale a ogni blocco, con prove per account;
 //!   C. ibrido: LtHash a ogni blocco + radice Merkle ogni secondo (10 blocchi), su un
 //!      thread separato con i soli account cambiati.
-//!   cargo run --release --example compare -- <accounts> [blocks_per_step]
+//!   cargo run --release --example compare -- <accounts> [blocks_per_step] [--steps 2000,2100,...] [--spl]
+//! --spl: ogni tx crea (CreateIdempotent) l'account token associato del destinatario
+//! e gli trasferisce un token SPL (TransferChecked), invece di un trasferimento CnFA.
 //! A e B dallo stesso passaggio: B = blocco - hash LtHash misurato + aggiornamento
 //! Merkle sugli stessi account. C in un secondo passaggio sugli stessi blocchi, con il
 //! thread Merkle davvero in esecuzione (compete per la CPU con il nodo).
@@ -22,6 +24,8 @@ use centrifuga::genesis::{self, Config, LAMPORTS_PER_CNFA, Prefund, transfer_tx}
 use centrifuga::node::Node;
 use merkle::Merkle;
 use solana_account::{Account, AccountSharedData};
+use solana_instruction::{AccountMeta, Instruction};
+use solana_message::{Message, VersionedMessage};
 use solana_address::Address;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -32,6 +36,62 @@ const SENDERS: usize = 2_000;
 const PER_ROOT: usize = 10;
 const STEPS: [usize; 10] = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000];
 const LIMIT_MS: f64 = 100.0;
+const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+
+fn ata(owner: &Address, mint: &Address) -> Address {
+    let (token, ata) = (TOKEN.parse::<Address>().unwrap(), ATA.parse::<Address>().unwrap());
+    Address::find_program_address(&[owner.as_ref(), token.as_ref(), mint.as_ref()], &ata).0
+}
+
+/// Mint SPL (82 byte): autorità, supply, 6 decimali, inizializzato.
+fn mint_data(authority: &Address, supply: u64) -> Vec<u8> {
+    let mut d = vec![0u8; 82];
+    d[..4].copy_from_slice(&1u32.to_le_bytes());
+    d[4..36].copy_from_slice(authority.as_ref());
+    d[36..44].copy_from_slice(&supply.to_le_bytes());
+    d[44] = 6;
+    d[45] = 1;
+    d
+}
+
+/// Account token (165 byte): mint, proprietario, saldo, stato inizializzato.
+fn token_account_data(mint: &Address, owner: &Address, amount: u64) -> Vec<u8> {
+    let mut d = vec![0u8; 165];
+    d[..32].copy_from_slice(mint.as_ref());
+    d[32..64].copy_from_slice(owner.as_ref());
+    d[64..72].copy_from_slice(&amount.to_le_bytes());
+    d[108] = 1;
+    d
+}
+
+/// Crea (se manca) l'account associato del destinatario e gli trasferisce `amount`.
+fn spl_tx(from: &Keypair, to: &Address, mint: &Address, amount: u64, bh: solana_hash::Hash) -> VersionedTransaction {
+    let (token, ata_id) = (TOKEN.parse::<Address>().unwrap(), ATA.parse::<Address>().unwrap());
+    let (src, dst) = (ata(&from.pubkey(), mint), ata(to, mint));
+    let create = Instruction {
+        program_id: ata_id,
+        accounts: vec![
+            AccountMeta::new(from.pubkey(), true),
+            AccountMeta::new(dst, false),
+            AccountMeta::new_readonly(*to, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
+            AccountMeta::new_readonly(token, false),
+        ],
+        data: vec![1],
+    };
+    let mut data = vec![12];
+    data.extend_from_slice(&amount.to_le_bytes());
+    data.push(6);
+    let transfer = Instruction {
+        program_id: token,
+        accounts: vec![AccountMeta::new(src, false), AccountMeta::new_readonly(*mint, false), AccountMeta::new(dst, false), AccountMeta::new_readonly(from.pubkey(), true)],
+        data,
+    };
+    let msg = Message::new_with_blockhash(&[create, transfer], Some(&from.pubkey()), &bh);
+    VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).unwrap()
+}
 
 fn rss_mb() -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
@@ -80,8 +140,13 @@ struct Step {
 }
 
 fn main() {
-    let args: Vec<u64> = std::env::args().skip(1).map(|a| a.replace('_', "").parse().expect("number")).collect();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let spl = raw.iter().any(|a| a == "--spl");
+    let steps_arg = raw.iter().position(|a| a == "--steps").map(|i| raw[i + 1].split(',').map(|x| x.parse::<usize>().unwrap()).collect::<Vec<_>>());
+    let step_list = steps_arg.clone().unwrap_or(STEPS.to_vec());
+    let args: Vec<u64> = raw.iter().enumerate().filter(|(i, a)| !a.starts_with("--") && !(*i > 0 && raw[i - 1] == "--steps")).map(|(_, a)| a.replace('_', "").parse().expect("number")).collect();
     let (n, blocks) = (args[0], *args.get(1).unwrap_or(&100) as usize);
+    let mint = addr(u64::MAX);
     let op = Keypair::new();
     let senders: Vec<Keypair> = (0..SENDERS).map(|_| Keypair::new()).collect();
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
@@ -102,6 +167,16 @@ fn main() {
     let system = solana_sdk_ids::system_program::id();
     for i in 0..n {
         chain.svm.set(addr(i), Account { lamports: rent, owner: system, ..Account::default() });
+    }
+    if spl {
+        // Mint e account token dei mittenti, creati direttamente nello stato iniziale.
+        let token = TOKEN.parse::<Address>().unwrap();
+        let (mrent, trent) = (chain.svm.rent_exempt(82), chain.svm.rent_exempt(165));
+        chain.svm.set(mint, Account { lamports: mrent, data: mint_data(&op.pubkey(), u64::MAX / 2), owner: token, ..Account::default() });
+        for k in &senders {
+            let data = token_account_data(&mint, &k.pubkey(), u64::MAX / 8_000);
+            chain.svm.set(ata(&k.pubkey(), &mint), Account { lamports: trent, data, owner: token, ..Account::default() });
+        }
     }
     chain.rehash();
     centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
@@ -146,14 +221,21 @@ fn main() {
     drop((node, mk0));
 
     // Tx firmate in anticipo per il carico massimo; ogni gradino usa i primi `load` di ogni blocco.
-    let max = *STEPS.last().unwrap();
+    let max = *step_list.iter().max().unwrap();
     let all: Vec<Vec<VersionedTransaction>> = (0..blocks as u64)
-        .map(|b| (0..max as u64).map(|j| transfer_tx(&senders[(j as usize) % SENDERS], &addr(rnd() % n.max(1)), 1 + b * max as u64 + j, bh)).collect())
+        .map(|b| {
+            (0..max as u64)
+                .map(|j| {
+                    let (from, to, amount) = (&senders[(j as usize) % SENDERS], addr(rnd() % n.max(1)), 1 + b * max as u64 + j);
+                    if spl { spl_tx(from, &to, &mint, amount, bh) } else { transfer_tx(from, &to, amount, bh) }
+                })
+                .collect()
+        })
         .collect();
 
     let mut steps: Vec<Step> = vec![];
     let mut peak_ram = 0;
-    for load in STEPS {
+    for &load in &step_list {
         cfg.node.max_block_txs = load;
         // Passaggio 1: A e B.
         let mut node = open(&cfg);
@@ -165,6 +247,7 @@ fn main() {
             now += 100;
             let ex = node.tick(now).unwrap();
             assert_eq!(ex.block.txs.len(), load);
+            assert!(ex.results.iter().all(|r| r.is_ok()), "tx fallita nel carico di prova");
             let acc = node.chain.svm.accounts();
             let list: Vec<(Address, Option<&AccountSharedData>)> = ex.changed.iter().map(|k| (*k, acc.get(k))).collect();
             let t = Instant::now();
@@ -233,7 +316,7 @@ fn main() {
     for v in 0..3 {
         let ok = steps.iter().filter(|s| pct(&pick(s, v).iter().map(|x| x.total).collect::<Vec<_>>(), 0.99) < LIMIT_MS).last();
         let Some(s) = ok else {
-            println!("| {n} | {} | < {} tx/blocco | | | | | | | | |", names[v], STEPS[0]);
+            println!("| {n} | {} | < {} tx/blocco | | | | | | | | |", names[v], step_list[0]);
             continue;
         };
         let bl = pick(s, v);
@@ -273,4 +356,27 @@ fn main() {
         );
     }
     println!("RAM di picco del processo: {peak_ram} MB");
+    // Riavvio dopo uno snapshot preso a fine corsa (stato cambiato dai blocchi): apertura
+    // del nodo (snapshot + LtHash completo) e costruzione dell'albero (Merkle, ibrido).
+    cfg.node.max_block_txs = step_list[0];
+    let mut node = open(&cfg);
+    let mut now = centrifuga::node::now_ms();
+    for txs in &all {
+        node.ingress.submit(None, txs[..step_list[0]].to_vec());
+        now += 100;
+        node.tick(now).unwrap();
+    }
+    node.snapshot().unwrap();
+    drop(node);
+    let t = Instant::now();
+    let node = Node::open(cfg.clone(), kp()).unwrap();
+    let reopen = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let mk = Merkle::build(node.chain.svm.accounts());
+    let rebuild = t.elapsed().as_secs_f64();
+    println!(
+        "albero all'avvio (snapshot iniziale): apertura {restart_lt:.2} s + albero {mk_build:.2} s; dopo ripristino da snapshot all'altezza {}: apertura {reopen:.2} s + albero {rebuild:.2} s ({} account)",
+        node.chain.height,
+        mk.index.len()
+    );
 }
