@@ -1,5 +1,8 @@
 //! Confronto dei moduli di archiviazione dello storico, sugli stessi record.
 //!   cargo run --release --features redb-archive --example archive_bench -- [tx] [tx_per_block]
+//!   cargo run --release --example archive_bench -- --node <accounts> <archivio> [blocks]
+//! --node: limite del nodo (carico massimo con p99 del blocco < 100 ms) senza e con
+//! l'indexer in esecuzione sulla stessa macchina, e crescita del disco per ora.
 //! Per ogni archivio: scrittura (tx/s, p50/p99 per blocco), byte per tx, lettura per
 //! firma (presente e assente), cronologia di un indirizzo, checkpoint, riapertura dopo
 //! un arresto pulito e dopo un arresto a metà (coda troncata), conservazione.
@@ -49,6 +52,10 @@ fn record(from: &Keypair, to: &Address, i: u64, slot: u64) -> TxRecord {
 }
 
 fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().map(String::as_str) == Some("--node") {
+        return node_limit(raw[1].replace('_', "").parse().unwrap(), &raw[2], raw.get(3).map_or(100, |b| b.parse().unwrap()));
+    }
     let a: Vec<u64> = std::env::args().skip(1).map(|x| x.replace('_', "").parse().unwrap()).collect();
     let (total, per) = (*a.first().unwrap_or(&2_000_000), *a.get(1).unwrap_or(&2_000));
     let senders: Vec<Keypair> = (0..2_000).map(|_| Keypair::new()).collect();
@@ -144,4 +151,128 @@ fn main() {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+fn addr(i: u64) -> Address {
+    let mut b = [0u8; 32];
+    b[..8].copy_from_slice(&i.to_le_bytes());
+    b[8] = 0xCA;
+    Address::new_from_array(b)
+}
+
+/// Limite del nodo con e senza indexer: stesso stato iniziale, stessi blocchi.
+fn node_limit(n: u64, storage: &str, blocks: usize) {
+    use centrifuga::genesis::{Config, IndexerConfig, LAMPORTS_PER_CNFA, Prefund};
+    use centrifuga::node::Node;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const STEPS: [usize; 7] = [1000, 1500, 2000, 2200, 2400, 2600, 3000];
+    let op = Keypair::new();
+    let senders: Vec<Keypair> = (0..2_000).map(|_| Keypair::new()).collect();
+    let mut cfg: Config = toml::from_str(include_str!("../centrifuga.example.toml")).unwrap();
+    cfg.genesis.operator = op.pubkey().to_string();
+    cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
+    cfg.genesis.timestamp_ms = centrifuga::node::now_ms() - 86_400_000;
+    cfg.genesis.prefund = senders.iter().map(|k| Prefund { pubkey: k.pubkey().to_string(), lamports: 1_000 * LAMPORTS_PER_CNFA }).collect();
+    cfg.node.snapshot_every = 0;
+    cfg.node.ingress_pending_per_payer = u32::MAX;
+    let base = PathBuf::from(std::env::var("LOAD_DIR").unwrap_or_else(|_| "/tmp/archive-bench".into())).join("node");
+    let _ = std::fs::remove_dir_all(&base);
+    cfg.node.data_dir = base.join("node");
+    std::fs::create_dir_all(&cfg.node.data_dir).unwrap();
+    cfg.indexer = Some(IndexerConfig { data_dir: base.join("indexer"), rpc_addr: "127.0.0.1:0".into(), storage: storage.into(), retention_blocks: 0, segment_txs: 1_000_000, snapshot_every: 0 });
+    let mut chain = centrifuga::genesis::build(&cfg.genesis).unwrap().0;
+    let rent = chain.svm.rent_exempt(0);
+    for i in 0..n {
+        chain.svm.set(addr(i), solana_account::Account { lamports: rent, owner: solana_sdk_ids::system_program::id(), ..Default::default() });
+    }
+    let snap0 = base.join("snapshot0.bin");
+    centrifuga::ledger::write_snapshot(&base, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
+    std::fs::rename(base.join("snapshot.bin"), &snap0).unwrap();
+    drop(chain);
+    let kp = || Keypair::try_from(op.to_bytes().as_slice()).unwrap();
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    // Stato pulito per ogni passaggio: snapshot iniziale, journal e indexer vuoti.
+    let fresh = |cfg: &Config| {
+        let _ = std::fs::remove_dir_all(&cfg.node.data_dir);
+        let _ = std::fs::remove_dir_all(&cfg.indexer.as_ref().unwrap().data_dir);
+        std::fs::create_dir_all(&cfg.node.data_dir).unwrap();
+        std::fs::create_dir_all(cfg.indexer.as_ref().unwrap().data_dir.join("state")).unwrap();
+        std::fs::copy(&snap0, cfg.node.data_dir.join("snapshot.bin")).unwrap();
+        std::fs::copy(&snap0, cfg.indexer.as_ref().unwrap().data_dir.join("state/snapshot.bin")).unwrap();
+        Node::open(cfg.clone(), kp()).unwrap()
+    };
+    let bh = fresh(&cfg).chain.last_hash;
+    let max = *STEPS.last().unwrap();
+    let all: Vec<Vec<_>> = (0..blocks as u64).map(|b| (0..max as u64).map(|j| transfer_tx(&senders[(j % 2_000) as usize], &addr(rnd() % n), 1 + b * max as u64 + j, bh)).collect()).collect();
+    println!("{n} account, archivio {storage}, {blocks} blocchi per gradino");
+    println!("| tx/blocco | senza indexer p50 / p99 ms | con indexer p50 / p99 ms | indexer indietro alla fine (blocchi) | journal B/tx | archivio B/tx |");
+    let (mut best, mut best_ix, mut bytes) = (0, 0, (0.0, 0.0));
+    for load in STEPS {
+        let mut cfg = cfg.clone();
+        cfg.node.max_block_txs = load;
+        let mut res = vec![];
+        for with_ix in [false, true] {
+            let mut node = fresh(&cfg);
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let journal = cfg.node.data_dir.join("journal.bin");
+            let follower = with_ix.then(|| {
+                let (cfg, stop, journal) = (cfg.clone(), stop.clone(), journal.clone());
+                std::thread::spawn(move || {
+                    let mut ix = centrifuga::indexer::Indexer::open(&cfg, &journal).unwrap();
+                    while !stop.load(Ordering::Relaxed) {
+                        if !ix.step().unwrap() {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                    }
+                    while ix.step().unwrap() {}
+                    ix
+                })
+            });
+            let (mut times, mut now) = (vec![], centrifuga::node::now_ms());
+            let wall = Instant::now();
+            for (i, txs) in all.iter().enumerate() {
+                // Tempo reale: un blocco ogni 100 ms, come il nodo vero (l'indexer gira nelle pause).
+                let due = wall + std::time::Duration::from_millis(100 * i as u64);
+                std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                node.ingress.submit(None, txs[..load].to_vec());
+                now += 100;
+                let t = Instant::now();
+                assert_eq!(node.tick(now).unwrap().block.txs.len(), load);
+                times.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let behind = follower.map(|f| {
+                let h = node.chain.height;
+                let lag_start = Instant::now();
+                stop.store(true, Ordering::Relaxed);
+                let ix = f.join().unwrap();
+                let a = ix.archive.lock().unwrap();
+                assert_eq!(a.height(), h, "l'indexer recupera");
+                bytes = (std::fs::metadata(&journal).unwrap().len() as f64 / (blocks * load) as f64, a.disk_bytes() as f64 / (blocks * load) as f64);
+                let _ = lag_start;
+                h - ix.chain.height.min(h)
+            });
+            res.push((pct(&mut times.clone(), 0.5), pct(&mut times, 0.99), behind));
+        }
+        let (a, b) = (&res[0], &res[1]);
+        println!("| {load} | {:.1} / {:.1} | {:.1} / {:.1} | {} | {:.0} | {:.0} |", a.0, a.1, b.0, b.1, b.2.unwrap_or(0), bytes.0, bytes.1);
+        if a.1 < 100.0 {
+            best = load;
+        }
+        if b.1 < 100.0 {
+            best_ix = load;
+        }
+        if a.1 >= 100.0 && b.1 >= 100.0 {
+            break;
+        }
+    }
+    let gb_hour = |load: usize, b: f64| load as f64 * 10.0 * 3600.0 * b / 1e9;
+    println!("limite del nodo (p99 < 100 ms): senza indexer {} tx/s, con indexer {} tx/s", best * 10, best_ix * 10);
+    println!("crescita del disco al limite con indexer ({} tx/s): journal {:.1} GB/ora, archivio {:.1} GB/ora", best_ix * 10, gb_hour(best_ix, bytes.0), gb_hour(best_ix, bytes.1));
 }
