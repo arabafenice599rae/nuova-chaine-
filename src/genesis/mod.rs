@@ -18,6 +18,9 @@ use crate::exec::{Chain, Params, Vaults};
 pub const LAMPORTS_PER_CNFA: u64 = 1_000_000_000;
 pub const SUPPLY_LAMPORTS: u64 = 100_000_000 * LAMPORTS_PER_CNFA;
 
+/// Programma timelock compilato (`programs/timelock`, sha256 nel README).
+pub const TIMELOCK_SO: &[u8] = include_bytes!("../../programs/timelock/centrifuga_timelock.so");
+
 /// Id del programma timelock (fisso nel genesis): sha256("centrifuga:timelock").
 pub fn timelock_program_id() -> Address {
     use sha2::{Digest, Sha256};
@@ -90,6 +93,8 @@ pub struct GenesisConfig {
     pub halving_blocks: u64,
     /// Fine del fee mining (24 mesi), se il vault "mining" non si esaurisce prima.
     pub fee_mining_end_height: u64,
+    /// Scadenza dei claim su "airdrop": da qui `to_reserve` sposta il residuo in "reserve".
+    pub claims_end_height: u64,
     /// Solo devnet/test: conti pre-finanziati, sottratti alla riserva.
     #[serde(default)]
     pub prefund: Vec<Prefund>,
@@ -144,8 +149,12 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
         "mainnet" => return Err("prefund ammesso solo con network = \"devnet\"".into()),
         n => return Err(format!("network sconosciuta: {n} (mainnet | devnet)")),
     }
+    if g.claims_end_height < g.fee_mining_end_height {
+        return Err("claims_end_height deve seguire fee_mining_end_height".into());
+    }
     let mut svm = Svm::genesis(g.lamports_per_signature);
-    // Account di sistema creati da litesvm: sysvar, builtin, feature, programmi.
+    svm.add_program(timelock_program_id(), TIMELOCK_SO)?;
+    // Account di sistema: sysvar, builtin, feature, programmi (timelock incluso).
     let system: u64 = svm.accounts().values().map(|a| a.lamports()).sum();
     let rent = svm.rent_exempt(VAULT_LEN);
     let mut prefund = Vec::new();
@@ -168,7 +177,7 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     // (nome, tipo, beneficiario, autorità dei claim, totale, inizio, fine).
     // Solo "operator" ha un beneficiario (withdraw); "reserve" esce solo via claim.
     for (name, kind, benef, auth, total, start, end) in [
-        ("airdrop", AIRDROP, none, op, airdrop, 0, 0),
+        ("airdrop", AIRDROP, none, op, airdrop, 0, g.claims_end_height),
         ("mining", MINING, none, none, mining, 0, 0),
         ("operator", OPERATOR, op, none, operator, 0, g.operator_unlock_blocks),
         ("reserve", RESERVE, none, op, reserve, g.reserve_unlock_height, g.reserve_unlock_height),

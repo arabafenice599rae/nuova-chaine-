@@ -84,6 +84,11 @@ impl Svm {
         self.0.set_account(k, a).expect("set_account");
     }
 
+    /// Programma BPF con loader upgradeable e nessuna autorità di upgrade: immutabile.
+    pub fn add_program(&mut self, id: Address, elf: &[u8]) -> Result<(), String> {
+        self.0.add_program(id, elf).map_err(|e| format!("programma {id}: {e:?}"))
+    }
+
     pub fn rent_exempt(&self, len: usize) -> u64 {
         self.0.minimum_balance_for_rent_exemption(len)
     }

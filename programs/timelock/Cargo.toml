@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT"
 description = "Vault con sblocco lineare e claim firmati dall'operatore (centrifuga)."
 
+# Toolchain SBF fissata: stessa versione => stesso .so (hash nel README).
+[package.metadata.solana]
+tools-version = "v1.57"
+
 [lib]
 crate-type = ["cdylib", "lib"]
 

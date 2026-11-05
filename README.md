@@ -64,7 +64,7 @@ centrifuga run centrifuga.toml
 
 `centrifuga genesis` costruisce lo stato iniziale e verifica:
 1. **conservazione**: somma di tutti i lamport, account di sistema inclusi
-   (6,350609621 CnFA di sysvar, builtin, feature e programmi), = 100.000.000 CnFA esatti;
+   (6,481638061 CnFA di sysvar, builtin, feature, programmi e vault), = 100.000.000 CnFA esatti;
 2. **determinismo**: costruisce due volte, produce 20 blocchi di test su una copia,
    li riesegue sull'altra e confronta gli hash.
 
@@ -72,10 +72,10 @@ Allocazione (vault del programma timelock):
 
 | Vault      | Importo                    | Uso / sblocco                                         |
 |------------|----------------------------|-------------------------------------------------------|
-| `airdrop`  | 20M CnFA                   | claim: 100 CnFA fissi ai primi 200.000 aventi diritto |
-| `mining`   | 30M CnFA                   | premi del fee mining                                  |
-| `operator` | 20M CnFA                   | lineare per blocco in 48 mesi                         |
-| `reserve`  | 30M − account di sistema   | bloccata fino al blocco 315.360.000 (~12 mesi); riceve il 90% delle fee base durante il fee mining |
+| `airdrop`  | 20M CnFA                   | claim: 100 CnFA fissi ai primi 200.000 aventi diritto; poi il residuo del fee mining; claim fino al blocco 708.480.000 |
+| `mining`   | 30M CnFA                   | premi del fee mining (lo muove solo il nodo)          |
+| `operator` | 20M CnFA                   | withdraw lineare per blocco in 48 mesi                |
+| `reserve`  | 30M − account di sistema   | solo claim a ondate dal blocco 315.360.000 (~12 mesi); riceve il 90% delle fee base durante il fee mining |
 
 `network = "mainnet" | "devnet"`. I conti `[[genesis.prefund]]` (sottratti alla
 riserva) sono ammessi solo su devnet: su mainnet `centrifuga genesis` fallisce.
@@ -98,15 +98,66 @@ riserva) sono ammessi solo su devnet: su mainnet `centrifuga genesis` fallisce.
 - **Fine del fee mining** (altezza raggiunta o vault `mining` vuoto): 100% della fee
   base all'operatore; il residuo di `mining` passa ad `airdrop` nel primo blocco
   successivo. Il nodo legge solo il saldo di `mining` e l'altezza di fine.
-- Il residuo si distribuirà con claim agli aventi diritto che hanno usato la chain,
-  con un tetto per account; la lista è calcolata off-chain dal journal e il suo
-  hash pubblicato qui (passo 3).
+- Il residuo si distribuisce con claim agli aventi diritto (vedi *Programma
+  timelock*).
 - `preBalances`/`postBalances` di getTransaction riflettono la tx; rimborso e
   premio sono accreditati a fine blocco.
 
 Il nodo conosce solo budget, regola 90/10, rimborso della priority fee e data di
-fine; sblocchi e claim sono nel programma timelock. Il vault `reserve`, ricevendo
-fee, sarà prelevabile in base al saldo reale (non a un totale fisso).
+fine; sblocchi e claim sono nel programma timelock.
+
+## Programma timelock
+
+`programs/timelock/` (Pinocchio 0.9.2, zero dipendenze transitive, < 400 righe),
+deployato nel genesis come programma **immutabile** (loader upgradeable senza
+autorità di upgrade). Il nodo include il `.so` nel binario.
+
+| Istruzione | Chi | Cosa |
+|---|---|---|
+| `withdraw` | chiunque | solo vault `operator`: sblocco lineare per altezza; paga sempre il beneficiario registrato |
+| `init_wave(importo)` | autorità (operatore) | apre un'ondata a importo fisso su `airdrop` o `reserve`, con bitmap anti-doppio-claim |
+| `claim(indice)` | chiunque | paga l'importo dell'ondata se l'istruzione precedente è la precompile ed25519 con la firma dell'operatore su (ondata, destinatario, importo, indice) |
+| `to_reserve` | chiunque | dal blocco `claims_end_height` (708.480.000 = 24 mesi + 90 giorni) sposta tutto il saldo di `airdrop` in `reserve` |
+
+- `reserve` esce **solo** tramite claim, dal blocco 315.360.000: nessun withdraw
+  verso l'operatore o altri.
+- `airdrop`: claim rifiutati dal blocco `claims_end_height`.
+- `mining`: nessuna istruzione.
+- Ogni uscita è limitata dal **saldo reale** del vault (meno il minimo per la rent
+  exemption), non da un totale fisso.
+
+### Build riproducibile
+
+```
+cargo install cargo-build-sbf --version 4.5.0 --locked
+cd programs/timelock && cargo build-sbf     # platform-tools fissate: v1.57 (Cargo.toml)
+sha256sum target/deploy/centrifuga_timelock.so
+```
+
+SHA-256 di `programs/timelock/centrifuga_timelock.so` (SBPF v3):
+
+```
+1cd1e548557ed8ed4445b22f57b514e242cffe3e0bb1ebc6fe9ac8c37324ea93
+```
+
+Verificato con due compilazioni pulite (`cargo clean` prima di ciascuna) e una terza
+in un'altra cartella: stesso hash.
+
+### Residuo del fee mining
+
+- Ha diritto chi è nella lista airdrop (storico Solana + inviti) e, **come
+  pagatore**, ha almeno 10 tx riuscite in almeno 5 giorni UTC diversi (timestamp
+  dei blocchi del periodo di fee mining).
+- Quota uguale per tutti: min(1.000 CnFA, residuo / numero aventi diritto).
+  La parte non assegnata resta in `airdrop` e passa a `reserve` con `to_reserve`
+  alla scadenza dei claim.
+- Lista deterministica, rieseguibile da chiunque con journal e config:
+
+```
+centrifuga eligible centrifuga.toml lista_airdrop.txt residuo.txt   # stampa lo sha256
+```
+
+Hash della lista: *da pubblicare a fine fee mining* (blocco 630.720.000).
 
 Programmi nel genesis: System, SPL Token, Token-2022, Associated Token Account,
 Compute Budget, Memo, precompile ed25519/secp256k1 (più quelli che litesvm carica
@@ -172,14 +223,15 @@ src/exec/          esecuzione blocchi, finestra blockhash, nonce, StateHasher
 src/ledger/        blocco, journal, snapshot
 src/ingress/       verifica firme batch, seq, coda FIFO
 src/genesis/       config TOML, stato iniziale, verifiche
-programs/timelock/ programma on-chain dei vault (passo 3)
+programs/timelock/ programma on-chain dei vault (+ .so compilato)
+src/claims.rs      aventi diritto al residuo del fee mining (off-chain)
 ```
 
 ## Stato
 
 - [x] Passo 1: genesis, transfer, blocco firmato, riavvio dal journal, stesso hash.
 - [x] Passo 2: fee mining 10/90, premio dal vault `mining`, rimborso priority fee, transizione.
-- [ ] Passo 3: programma timelock (withdraw lineare, claim_airdrop).
+- [x] Passo 3: programma timelock (withdraw lineare, ondate di claim, to_reserve), aventi diritto dal journal.
 - [~] Passo 4: RPC e WebSocket fatti e verificati con web3.js; mancano stream, ingresso QUIC e test con Solflare.
 
 Licenza: MIT.

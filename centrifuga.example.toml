@@ -25,6 +25,7 @@ reserve_unlock_height = 315360000     # ~12 mesi a 100 ms
 block_budget_lamports = 10000000      # 0,01 CnFA
 halving_blocks = 157680000            # 6 mesi
 fee_mining_end_height = 630720000     # 24 mesi
+claims_end_height = 708480000         # 24 mesi + 90 giorni: poi airdrop -> reserve
 
 # Solo con network = "devnet": conti pre-finanziati, sottratti alla riserva.
 # [[genesis.prefund]]
