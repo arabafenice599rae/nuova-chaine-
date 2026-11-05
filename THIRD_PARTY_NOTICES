@@ -348,6 +348,7 @@ toml_datetime 1.1.2+spec-1.1.0  MIT OR Apache-2.0  https://github.com/toml-rs/to
 toml_edit 0.25.18+spec-1.1.0  MIT OR Apache-2.0  https://github.com/toml-rs/toml
 toml_parser 1.1.5+spec-1.1.0  MIT OR Apache-2.0  https://github.com/toml-rs/toml
 toml_writer 1.2.0+spec-1.1.0  MIT OR Apache-2.0  https://github.com/toml-rs/toml
+try-lock 0.2.5  MIT  https://github.com/seanmonstar/try-lock
 tungstenite 0.30.0  MIT OR Apache-2.0  https://github.com/snapview/tungstenite-rs
 typenum 1.20.1  MIT OR Apache-2.0  https://github.com/paholg/typenum
 unicode-ident 1.0.27  (MIT OR Apache-2.0) AND Unicode-3.0  https://github.com/dtolnay/unicode-ident
@@ -356,6 +357,7 @@ unreachable 1.0.0  MIT / Apache-2.0  https://github.com/reem/rust-unreachable.gi
 untrusted 0.9.0  ISC  https://github.com/briansmith/untrusted
 uriparse 0.6.4  MIT  https://github.com/sgodwincs/uriparse-rs
 void 1.0.2  MIT  https://github.com/reem/rust-void.git
+want 0.3.2  MIT  https://github.com/seanmonstar/want
 webpki-roots 1.0.11  CDLA-Permissive-2.0  https://github.com/rustls/webpki-roots
 wincode 0.6.3  Apache-2.0  https://github.com/anza-xyz/wincode
 winnow 0.7.15  MIT  https://github.com/winnow-rs/winnow
@@ -8938,6 +8940,30 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ------------------------------------------------------------------------------
+Applies to: try-lock 0.2.5
+
+Copyright (c) 2018-2023 Sean McArthur
+Copyright (c) 2016 Alex Crichton
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+------------------------------------------------------------------------------
 Applies to: tungstenite 0.30.0
 
 Copyright (c) 2017 Alexey Galakhov
@@ -9332,6 +9358,29 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+------------------------------------------------------------------------------
+Applies to: want 0.3.2
+
+Copyright (c) 2018-2019 Sean McArthur
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 Applies to: webpki-roots 1.0.11
