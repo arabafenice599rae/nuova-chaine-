@@ -109,3 +109,13 @@ impl Block {
         Ok(Block { header: Header { height, prev_hash, timestamp_ms, state_hash, signature }, txs })
     }
 }
+
+/// Prova di frode: due blocchi con firma valida dell'operatore, diversi, alla stessa
+/// altezza o con lo stesso blocco precedente (un fork, anche con altezze diverse).
+pub fn is_fraud_proof(a: &Block, b: &Block, operator: &Address) -> bool {
+    let (ha, hb) = (&a.header, &b.header);
+    a.hash() != b.hash()
+        && (ha.height == hb.height || ha.prev_hash == hb.prev_hash)
+        && a.verify_signature(operator)
+        && b.verify_signature(operator)
+}

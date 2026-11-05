@@ -29,6 +29,8 @@ pub struct Node {
     pub recent: VecDeque<(u64, u64, Vec<Address>)>,
     /// Istante di arrivo delle richieste sendTransaction, per misurare il tempo nel nodo.
     pub arrivals: std::collections::HashMap<solana_signature::Signature, Instant>,
+    /// Ora dell'ultimo blocco prodotto da questo processo (None dopo l'avvio).
+    last_tick_ms: Option<u64>,
     /// Offset nel journal dell'ultimo blocco (None all'altezza 0).
     pub last_offset: Option<u64>,
     journal: Journal,
@@ -50,6 +52,11 @@ impl Node {
         let mut chain = match snap {
             None => genesis::build(&cfg.genesis)?.0,
             Some(s) => {
+                // Lo snapshot deve appartenere a questo genesis (parametri inclusi nel suo hash).
+                let expected = genesis::build(&cfg.genesis)?.0.genesis_hash;
+                if s.genesis_hash != expected {
+                    return Err(format!("snapshot di un altro genesis ({} invece di {expected})", s.genesis_hash));
+                }
                 let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
                 // La finestra parte dal genesis; il journal fino a `snap_height` la riempie.
                 Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash)
@@ -68,8 +75,7 @@ impl Node {
                         return Err(format!("snapshot {snap_height}: hash di stato diverso dal journal"));
                     }
                 }
-                chain.note_block(&b);
-                Ok(())
+                chain.note_block(&b)
             } else {
                 let ex = chain.apply(&b)?;
                 index.record(&ex);
@@ -81,13 +87,23 @@ impl Node {
             return Err("journal più corto dello snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_offset, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_tick_ms: None, last_offset, journal, dir, keypair })
     }
 
-    /// Un ciclo di slot: preleva in ordine FIFO, esegue, firma, scrive nel journal.
+    /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
+    /// heartbeat_slots. Dopo un avvio è 1: nessun recupero del tempo di fermo.
+    pub fn gap(&self, now_ms: u64) -> u64 {
+        let r = self.chain.params.rules;
+        // Arrotondato allo slot più vicino: i blocchi partono ai confini di slot, con qualche ms di scarto.
+        self.last_tick_ms.map_or(1, |t| ((now_ms.saturating_sub(t) + r.slot_ms / 2) / r.slot_ms).clamp(1, r.heartbeat_slots))
+    }
+
+    /// Produce il blocco successivo: preleva in ordine FIFO, esegue, firma, scrive nel journal.
     pub fn tick(&mut self, now_ms: u64) -> Result<Executed, String> {
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
-        let ex = self.chain.produce(txs, now_ms, &self.keypair);
+        let height = self.chain.height + self.gap(now_ms);
+        self.last_tick_ms = Some(now_ms);
+        let ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
         self.index.record(&ex);
         for tx in &ex.block.txs {
@@ -110,16 +126,24 @@ impl Node {
         Ok(ex)
     }
 
-    /// Ciclo principale: un blocco ogni slot; tra un blocco e l'altro esegue le query.
+    /// Ciclo principale: a ogni slot un blocco se ci sono tx in coda, oppure se
+    /// da `heartbeat_slots` slot non ne esce uno; tra uno slot e l'altro, le query.
     pub fn serve(mut self, queries: Receiver<Query>, mut on_block: impl FnMut(&Node, &Executed)) -> Result<(), String> {
-        let slot = Duration::from_millis(self.cfg.node.slot_ms);
+        let slot = Duration::from_millis(self.cfg.genesis.slot_ms);
+        let heartbeat = slot * self.cfg.genesis.heartbeat_slots.max(1) as u32;
         let mut next = Instant::now() + slot;
+        // Primo blocco al primo slot: dopo un avvio o un riavvio l'altezza è subito quella reale.
+        let mut last_block = Instant::now().checked_sub(heartbeat).unwrap_or_else(Instant::now);
         loop {
             let now = Instant::now();
             if now >= next {
-                let ex = self.tick(crate::node::now_ms())?;
-                on_block(&self, &ex);
                 next = (next + slot).max(now);
+                if self.ingress.is_empty() && now.duration_since(last_block) + slot / 2 < heartbeat {
+                    continue; // slot vuoto: nessun blocco
+                }
+                let ex = self.tick(crate::node::now_ms())?;
+                last_block = now;
+                on_block(&self, &ex);
                 // Anche se la produzione non sta nello slot, le query non restano mai ferme.
                 if let Ok(q) = queries.try_recv() {
                     q(&mut self);
@@ -170,18 +194,18 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         stream: crate::stream::Stream {
             queries: qtx,
             blocks: blocks.clone(),
-            max_wait: Duration::from_millis(cfg.node.slot_ms * cfg.node.stream_max_lag_blocks as u64),
+            max_wait: Duration::from_millis(cfg.genesis.slot_ms * cfg.node.stream_max_lag_blocks as u64),
         },
         cfg: cfg.clone(),
     };
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let sym = cfg.node.token_symbol.clone();
+        let sym = cfg.genesis.symbol.clone();
         let node = match Node::open(cfg, keypair) {
             Ok(n) => n,
             Err(e) => return drop(ready_tx.send(Err(e))),
         };
-        println!("{}: altezza {}, hash {}", node.cfg.node.token_name, node.chain.height, node.chain.last_hash);
+        println!("{} ({}): altezza {}, hash {}", node.cfg.genesis.chain_name, node.cfg.genesis.chain_id, node.chain.height, node.chain.last_hash);
         let _ = ready_tx.send(Ok(()));
         let res = node.serve(qrx, |n, ex| {
             let _ = events.send(Arc::new(BlockEvent::new(ex)));

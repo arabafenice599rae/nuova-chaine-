@@ -26,6 +26,7 @@ fn setup() -> T {
     let (op, user) = (Keypair::new(), Keypair::new());
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
     cfg.genesis.operator_unlock_blocks = 100;
     cfg.genesis.reserve_unlock_height = 10;
@@ -57,6 +58,15 @@ impl T {
         while self.c.height + 1 < height {
             self.t += 100;
             self.c.produce(vec![], self.t, &self.op);
+        }
+    }
+    /// Blocchi vuoti a salti di 10 (il massimo con heartbeat_slots = 10): il prossimo
+    /// blocco sarà all'altezza `height`. Le altezze intermedie non hanno un blocco.
+    fn jump(&mut self, height: u64) {
+        while self.c.height + 1 < height {
+            self.t += 1_000;
+            let next = (self.c.height + 10).min(height - 1);
+            self.c.produce_at(next, vec![], self.t, &self.op);
         }
     }
     fn bal(&self, k: &Address) -> u64 {
@@ -207,4 +217,42 @@ fn airdrop_deadline_and_permissionless_to_reserve() {
     assert_eq!(t.spendable("airdrop"), 0);
     assert!(t.bal(&vault_address("reserve")) >= reserve0 + left);
     t.to_reserve(&funded).unwrap(); // idempotente: sposta 0
+}
+
+#[test]
+fn unlocks_and_deadline_crossed_by_height_jumps() {
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    let opk = op.pubkey();
+    // Withdraw lineare a un'altezza raggiunta con un salto: 40/100 = 40%.
+    let start = t.bal(&opk);
+    t.jump(40);
+    t.withdraw("operator", opk).unwrap();
+    assert_eq!(t.bal(&opk) - start, OPERATOR_TOTAL / 100 * 40 + 5_000);
+    // Airdrop: la scadenza dei claim (30) è stata superata dal salto a 40.
+    let x = Address::new_unique();
+    let wave = t.wave("airdrop", LAMPORTS_PER_CNFA, 8, &op).unwrap();
+    assert_err(t.claim("airdrop", wave, x, LAMPORTS_PER_CNFA, 0, &op, x), 4);
+    let funded = Keypair::try_from(t.user.to_bytes().as_slice()).unwrap();
+    t.to_reserve(&funded).unwrap();
+    assert_eq!(t.spendable("airdrop"), 0);
+}
+
+#[test]
+fn reserve_unlock_crossed_by_height_jump() {
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    let five = 5 * LAMPORTS_PER_CNFA;
+    let wave = t.wave("reserve", five, 8, &op).unwrap(); // altezza 1
+    let x = Address::new_unique();
+    assert_err(t.claim("reserve", wave, x, five, 0, &op, x), 4); // altezza 2 < 10
+    t.jump(15); // salti 2 -> 12 -> 14: l'altezza 10 (sblocco) non ha un blocco
+    t.claim("reserve", wave, x, five, 0, &op, x).unwrap();
+    assert_eq!(t.bal(&x), five);
+    // Airdrop: un claim prima della scadenza riesce anche dopo un salto che resta sotto.
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    let wave = t.wave("airdrop", five, 8, &op).unwrap();
+    t.jump(29);
+    t.claim("airdrop", wave, x, five, 0, &op, x).unwrap(); // altezza 29 < 30
 }

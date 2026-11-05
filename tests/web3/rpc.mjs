@@ -34,8 +34,22 @@ ok("getBalance", bal0);
 
 // Transfer con priority fee (non cambia l'ordine), via WebSocket per la conferma.
 const to = web3.Keypair.generate().publicKey;
-const accountNotified = new Promise((res) => {
-  const id = conn.onAccountChange(to, (info) => { conn.removeAccountChangeListener(id); res(info.lamports); });
+// accountSubscribe su un WebSocket diretto: si invia la tx solo dopo la conferma
+// dell'iscrizione (le notifiche riguardano solo le modifiche successive).
+const wsUrl = url.replace(/^http/, "ws").replace(/:(\d+)$/, (_, p) => `:${Number(p) + 1}`);
+const sock = new WebSocket(wsUrl);
+await new Promise((res, rej) => { sock.onopen = res; sock.onerror = () => rej(new Error(`WebSocket ${wsUrl}`)); });
+const accountNotified = new Promise((res, rej) => {
+  const timer = setTimeout(() => rej(new Error("accountNotification non arrivata in 15 s")), 15000);
+  sock.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.method === "accountNotification") { clearTimeout(timer); sock.close(); res(m.params.result.value.lamports); }
+  };
+});
+await new Promise((res, rej) => {
+  const prev = sock.onmessage;
+  sock.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.id === 1) { sock.onmessage = prev; m.result ? res() : rej(new Error(JSON.stringify(m))); } };
+  sock.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "accountSubscribe", params: [to.toBase58(), { encoding: "base64" }] }));
 });
 const tx = new web3.Transaction().add(
   web3.ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }),

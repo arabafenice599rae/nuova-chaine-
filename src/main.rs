@@ -25,9 +25,9 @@ fn main() {
 
 fn cmd_genesis(path: &Path) -> Result<(), String> {
     let cfg = Config::load(path)?;
-    let sym = &cfg.node.token_symbol;
+    let sym = &cfg.genesis.symbol;
     let (chain, s) = genesis::build(&cfg.genesis)?;
-    println!("{} ({sym}), supply {}", cfg.node.token_name, fmt_amount(genesis::SUPPLY_LAMPORTS, sym));
+    println!("{} ({sym}, {}), supply {}", cfg.genesis.chain_name, cfg.genesis.chain_id, fmt_amount(genesis::SUPPLY_LAMPORTS, sym));
     println!("account di sistema: {}", fmt_amount(s.system_lamports, sym));
     for name in genesis::VAULT_NAMES {
         let k = genesis::vault_address(name);
@@ -35,7 +35,7 @@ fn cmd_genesis(path: &Path) -> Result<(), String> {
     }
     println!("riserva netta: {}", fmt_amount(s.reserve_lamports, sym));
     println!("conservazione: OK (somma = {})", fmt_amount(chain.total_lamports() as u64, sym));
-    let h = genesis::check_determinism(&cfg.genesis, 20, cfg.node.slot_ms)?;
+    let h = genesis::check_determinism(&cfg.genesis, 20)?;
     println!("determinismo: OK (20 blocchi di test, hash finale {h})");
     println!("genesis hash: {}", chain.genesis_hash);
     Ok(())
@@ -61,7 +61,7 @@ fn cmd_eligible(path: &Path, list: &str, out: &str) -> Result<(), String> {
     let e = claims::compute(&cfg.genesis, &cfg.node.data_dir.join("journal.bin"), &airdrop)?;
     let (file, hash) = e.render();
     std::fs::write(out, &file).map_err(|e| format!("{out}: {e}"))?;
-    let sym = &cfg.node.token_symbol;
+    let sym = &cfg.genesis.symbol;
     println!("fine fee mining al blocco {}, residuo {}", e.end_height, fmt_amount(e.residual, sym));
     println!("aventi diritto: {} su {} in lista, quota {}", e.eligible.len(), airdrop.len(), fmt_amount(e.quota, sym));
     println!("non assegnato (a reserve): {}", fmt_amount(e.unassigned, sym));

@@ -24,6 +24,7 @@ fn setup(payers: &[&Keypair], f: impl FnOnce(&mut Config)) -> T {
     let op = Keypair::new();
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
     for p in payers.iter().copied().chain([&op]) {
         cfg.genesis.prefund.push(Prefund { pubkey: p.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
@@ -39,6 +40,18 @@ impl T {
         let ex = self.c.produce(txs, self.t, &self.op);
         assert_eq!(ex.block.txs.len(), ex.results.len());
         ex.settlement
+    }
+    /// Blocco all'altezza `h`: il salto deve rispettare la regola (1..=heartbeat_slots).
+    fn block_at(&mut self, h: u64, txs: Vec<VersionedTransaction>) -> Settlement {
+        self.t += 1_000;
+        self.c.produce_at(h, txs, self.t, &self.op).settlement
+    }
+    /// Blocchi vuoti a salti di 10 (il massimo con heartbeat_slots = 10) fino a `h`.
+    fn advance(&mut self, h: u64) {
+        while self.c.height < h {
+            let next = (self.c.height + 10).min(h);
+            self.block_at(next, vec![]);
+        }
     }
     fn bal(&self, k: &Address) -> u64 {
         self.c.svm.lamports(k)
@@ -195,6 +208,7 @@ fn replay_reproduces_fee_settlement() {
     let mut t = setup(&[&a, &b], f);
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = t.op.pubkey().to_string();
     for p in [&a, &b, &t.op] {
         cfg.genesis.prefund.push(Prefund { pubkey: p.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
@@ -223,5 +237,28 @@ fn prefund_rejected_on_mainnet() {
     assert!(err.contains("devnet"), "{err}");
     // Il controllo di determinismo usa una copia devnet e resta possibile su mainnet.
     cfg.genesis.prefund.clear();
-    genesis::check_determinism(&cfg.genesis, 3, 100).unwrap();
+    genesis::check_determinism(&cfg.genesis, 3).unwrap();
+}
+
+#[test]
+fn halving_and_end_crossed_by_height_jumps() {
+    let a = Keypair::new();
+    let mut t = setup(&[&a], |c| {
+        c.genesis.block_budget_lamports = 1_000;
+        c.genesis.halving_blocks = 100;
+        c.genesis.fee_mining_end_height = 1_000;
+    });
+    let to = Address::new_unique();
+    // Un salto da 195 a 205 scavalca l'altezza 200 (nessun blocco lì): due dimezzamenti.
+    t.advance(195);
+    let s = t.block_at(205, vec![transfer_tx(&a, &to, 1, t.c.last_hash)]);
+    assert_eq!((s.mining_active, s.reward), (true, 250));
+    // Un salto da 995 a 1.003 scavalca la fine (1.000): il periodo si chiude una sola volta.
+    t.advance(995);
+    let (airdrop0, left) = (t.bal(&vault_address("airdrop")), t.mining());
+    let s = t.block_at(1_003, vec![transfer_tx(&a, &to, 2, t.c.last_hash)]);
+    assert_eq!((s.mining_active, s.operator, s.reward, s.to_airdrop), (false, 5_000, 0, left));
+    assert_eq!(t.bal(&vault_address("airdrop")), airdrop0 + left);
+    assert_eq!(t.block_at(1_013, vec![]).to_airdrop, 0);
+    assert_eq!(t.c.total_lamports(), SUPPLY_LAMPORTS as u128);
 }

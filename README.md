@@ -3,8 +3,8 @@
 Chain pubblica compatibile con Solana (SVM) a **validatore unico**, in un solo binario.
 Nessun consenso, nessun voto, nessun relay: chi costruisce il blocco è chi lo firma.
 
-Token nativo: **CENTRIFUGA**, simbolo **CnFA** (forma canonica), 9 decimali. È il lamport
-dell'SVM: i wallet esterni (Solflare, Phantom) lo mostreranno comunque come "SOL".
+Chain **Centrifuga** (`centrifuga:mainnet`, `centrifuga:devnet`), token nativo con simbolo **CnFA** (forma canonica), 9 decimali. È il lamport
+dell'SVM: i wallet esterni lo mostreranno comunque come "SOL".
 Supply fissa di 100.000.000 CnFA, zero inflazione, zero staking.
 
 ## Modello di fiducia (onesto)
@@ -27,23 +27,39 @@ Tutto tranne censura e ordine di arrivo è verificabile da chiunque rieseguendo 
 
 Ogni blocco è firmato dall'operatore. La firma copre
 `sha256(altezza ‖ hash_precedente ‖ timestamp ‖ hash_stato ‖ sha256(corpo))`.
-**Due header con firma valida e la stessa altezza ma hash diverso** sono una prova
+**Due header diversi con firma valida e la stessa altezza, oppure lo stesso
+blocco precedente** (un fork, anche ad altezze diverse) sono una prova
 crittografica che l'operatore ha creato un fork: chiunque li possieda può pubblicarli.
 Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra prova.
 
 ## Blocchi
 
-- Slot ogni 100 ms (`slot_ms`), anche vuoti: le altezze misurano il tempo
-  (sblocchi dei vault, fee mining).
+- Slot ogni 100 ms (`slot_ms`). Un blocco esce solo se ci sono transazioni in coda,
+  oppure ogni `heartbeat_slots` slot (default 10 = 1 s) come segnale di presenza.
+- **Regole di validità** (parametri del genesis, inclusi nel suo hash), controllate da
+  `Chain::apply`, dalla riesecuzione del journal e da `stream::Replica`:
+  - salto = altezza − altezza precedente, con **1 ≤ salto ≤ `heartbeat_slots`**;
+  - **timestamp − precedente ≥ salto × `slot_ms` / 2** (e almeno 1 ms);
+  - la replica in tempo reale rifiuta anche i timestamp oltre 5 s nel suo futuro.
+- Il produttore usa come salto gli slot trascorsi dall'ultimo blocco (al massimo
+  `heartbeat_slots`) e come timestamp max(ora, precedente + salto × slot_ms / 2,
+  precedente + 1). Dopo un riavvio riparte da ultima altezza + 1: il tempo di fermo non
+  viene recuperato, quindi l'altezza misura il tempo di attività della chain.
+- Un blocco vuoto occupa 152 byte: con l'heartbeat a 1 s il journal cresce di ~13 MB
+  al giorno senza traffico (contro ~130 MB con un blocco a ogni slot).
 - Header: altezza, hash precedente, timestamp (ms, monotono:
   `max(ora, precedente + 1)`), hash di stato, firma dell'operatore. Corpo: le tx
   nell'ordine eseguito.
 - A ogni blocco la sysvar Clock riceve `slot = altezza` e `unix_timestamp`.
+- Genesis hash: il blocco 0 ha come `prev_hash` lo SHA-256 dei parametri di consenso
+  (operatore, fee, finestra, fee mining, `slot_ms`, `heartbeat_slots`, vault): chi
+  verifica con parametri diversi ottiene un altro genesis.
 - Hash di stato: SHA-256 su tutti gli account ordinati per pubkey (dietro
   l'interfaccia `StateHasher`, sostituibile da un hasher incrementale).
-- Blockhash = hash del blocco. Una tx è valida se il suo blockhash è tra gli ultimi
-  N blocchi (`blockhash_window`, default 300 ≈ 30 s), oppure se usa un durable nonce
-  valido. Filtro anti-duplicati sulle firme degli ultimi N blocchi.
+- Blockhash = hash del blocco. Il blockhash del blocco all'altezza h vale nei blocchi
+  fino all'altezza h + N (`blockhash_window`, default 300 slot = 30 s), oppure la tx
+  usa un durable nonce valido. Anti-duplicati: le firme restano note per lo stesso
+  intervallo. `getLatestBlockhash` riporta `lastValidBlockHeight` = h + N.
 - Ordine: FIFO rigoroso per seq di arrivo. La priority fee **non** cambia l'ordine.
 
 ## Persistenza
@@ -176,14 +192,15 @@ Metodi HTTP: `getBalance`, `getAccountInfo`, `getMultipleAccounts`,
 `getFeeForMessage`, `getMinimumBalanceForRentExemption`,
 `getRecentPrioritizationFees`, `simulateTransaction`, `sendTransaction`,
 `getSignatureStatuses`, `getSignaturesForAddress`, `getTransaction`, `getVersion`,
-`getHealth`. WebSocket: `accountSubscribe`, `signatureSubscribe` (e unsubscribe).
+`getHealth`, `getChainInfo` (identità della chain, anche su `GET /chain.json`: vedi
+[docs/chain-identity.md](docs/chain-identity.md)). WebSocket: `accountSubscribe`, `signatureSubscribe` (e unsubscribe).
 
 Differenze da Solana, per scelta:
 - tutto è subito `finalized` (un solo firmatario, nessun fork); `commitment` è ignorato;
 - nessuna epoca: `getEpochInfo` riporta `epoch: 0`;
 - `getRecentPrioritizationFees` è sempre 0: la priority fee non compra posizione;
 - `getFeeForMessage` riporta solo la fee base (la priority fee è rimborsata);
-- `getVersion` aggiunge `centrifuga` e `token: {name, symbol, decimals}`;
+- `getVersion` aggiunge `centrifuga`, `chainId` e `token: {name, symbol, decimals}`;
 - `jsonParsed`: token account e mint SPL interpretati; transazioni in forma
   parzialmente decodificata (istruzioni con `programId`, `data` in base58);
   `preTokenBalances`/`postTokenBalances` e `innerInstructions` vuoti;
@@ -201,8 +218,8 @@ cd tests/web3 && npm ci && cd ../..
 scripts/web3-node.sh rpc.mjs
 ```
 
-Test con Solflare: vedi [docs/solflare-devnet.md](docs/solflare-devnet.md) (nodo devnet,
-endpoint HTTPS pubblico, prefund, checklist).
+Nodo devnet su VPS: vedi [docs/devnet.md](docs/devnet.md) (nodo devnet,
+endpoint HTTPS pubblico, prefund, latenza).
 
 ## Stream
 
@@ -257,7 +274,7 @@ blocco firmato, misurato dal nodo (`centrifugaNodeLatencyUs` in `getTransaction`
   anche il preflight, eseguito una tx alla volta sul thread del nodo (60 tx in
   parallelo: p50 160 ms con slot 100 ms).
 - Su loopback la rete è trascurabile: QUIC si valuta con la stessa misura fatta da
-  una rete reale verso un VPS (vedi [docs/solflare-devnet.md](docs/solflare-devnet.md)).
+  una rete reale verso un VPS (vedi [docs/devnet.md](docs/devnet.md)).
 
 Riprodurre in locale: `scripts/web3-node.sh latency.mjs 100` (slot in ms come secondo
 argomento); verso un nodo remoto: `node latency.mjs https://<dominio> bench.json`.
@@ -266,7 +283,7 @@ argomento); verso un nodo remoto: `node latency.mjs https://<dominio> bench.json
 
 `deploy/devnet-install.sh` installa su un VPS Linux pulito un nodo devnet come servizio
 systemd, con HTTPS (Caddy + Let's Encrypt), chiavi generate sul server e conti
-prefinanziati. Passi e requisiti in [docs/solflare-devnet.md](docs/solflare-devnet.md).
+prefinanziati. Passi e requisiti in [docs/devnet.md](docs/devnet.md).
 
 ## CLI
 
@@ -313,6 +330,6 @@ src/claims.rs      aventi diritto al residuo del fee mining (off-chain)
 - [x] Passo 2: fee mining 10/90, premio dal vault `mining`, rimborso priority fee, transizione.
 - [x] Passo 3: programma timelock (withdraw lineare, ondate di claim, to_reserve), aventi diritto dal journal.
 - [x] Passo 4: RPC, WebSocket, stream con recupero, limiti di ingresso, CI, `balance`.
-- [ ] Test con Solflare (guida e checklist in `docs/`); QUIC da valutare con le latenze misurate.
+- [ ] QUIC: da valutare con le latenze misurate da una rete esterna.
 
 Licenza: MIT.

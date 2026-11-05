@@ -13,7 +13,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
 use crate::exec::litesvm_internal::Svm;
-use crate::exec::{Chain, Params, Vaults};
+use crate::exec::{Chain, Identity, Params, Rules, Vaults};
 
 pub const LAMPORTS_PER_CNFA: u64 = 1_000_000_000;
 pub const SUPPLY_LAMPORTS: u64 = 100_000_000 * LAMPORTS_PER_CNFA;
@@ -57,9 +57,9 @@ pub struct Config {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct NodeConfig {
-    pub token_name: String,
-    pub token_symbol: String,
-    pub slot_ms: u64,
+    /// URL del logo pubblicato in getChainInfo e /chain.json (non fa parte del genesis).
+    #[serde(default)]
+    pub logo_url: String,
     pub data_dir: PathBuf,
     pub operator_keypair: PathBuf,
     pub snapshot_every: u64,
@@ -84,8 +84,17 @@ pub struct NodeConfig {
 pub struct GenesisConfig {
     /// "mainnet" o "devnet". Solo devnet ammette `prefund`.
     pub network: String,
+    /// Identità (nel genesis hash): chain_id = "centrifuga:<network>", simbolo "CnFA".
+    pub chain_id: String,
+    pub chain_name: String,
+    pub symbol: String,
+    pub decimals: u8,
     pub timestamp_ms: u64,
     pub operator: String,
+    /// Durata di uno slot. Regola: timestamp - precedente >= salto × slot_ms / 2.
+    pub slot_ms: u64,
+    /// Salto massimo di altezza tra due blocchi; senza tx, un blocco ogni heartbeat_slots slot.
+    pub heartbeat_slots: u64,
     pub lamports_per_signature: u64,
     pub blockhash_window: usize,
     /// Vault "airdrop": claim degli aventi diritto (e residuo del fee mining).
@@ -140,6 +149,13 @@ impl GenesisConfig {
                 airdrop: vault_address("airdrop"),
                 reserve: vault_address("reserve"),
             },
+            rules: Rules { slot_ms: self.slot_ms, heartbeat_slots: self.heartbeat_slots },
+            identity: Identity {
+                chain_id: self.chain_id.clone(),
+                name: self.chain_name.clone(),
+                symbol: self.symbol.clone(),
+                decimals: self.decimals,
+            },
         })
     }
 }
@@ -157,6 +173,19 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
         "mainnet" if g.prefund.is_empty() => {}
         "mainnet" => return Err("prefund ammesso solo con network = \"devnet\"".into()),
         n => return Err(format!("network sconosciuta: {n} (mainnet | devnet)")),
+    }
+    // Identità: simbolo esatto (maiuscole e minuscole contano), chain_id coerente con network.
+    if g.symbol != "CnFA" {
+        return Err(format!("simbolo \"{}\": deve essere esattamente \"CnFA\"", g.symbol));
+    }
+    if g.chain_id != format!("centrifuga:{}", g.network) {
+        return Err(format!("chain_id \"{}\" non corrisponde a network = \"{}\"", g.chain_id, g.network));
+    }
+    if g.decimals != 9 || g.chain_name.is_empty() {
+        return Err("servono decimals = 9 (i lamport) e un nome".into());
+    }
+    if g.slot_ms < 2 || g.heartbeat_slots == 0 {
+        return Err("servono slot_ms >= 2 e heartbeat_slots >= 1".into());
     }
     if g.claims_end_height < g.fee_mining_end_height {
         return Err("claims_end_height deve seguire fee_mining_end_height".into());
@@ -207,12 +236,13 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
 
 /// Determinismo: costruisce due volte il genesis (più un conto di test), produce
 /// `n` blocchi con trasferimenti sul primo, li riesegue sul secondo e confronta.
-pub fn check_determinism(g: &GenesisConfig, n: u64, slot_ms: u64) -> Result<Hash, String> {
+pub fn check_determinism(g: &GenesisConfig, n: u64) -> Result<Hash, String> {
     let op = Keypair::new();
     let payer = Keypair::new_from_array([7; 32]);
     let mut g = g.clone();
     // Copia di prova, mai pubblicata: può usare un conto prefinanziato.
     g.network = "devnet".into();
+    g.chain_id = "centrifuga:devnet".into();
     g.operator = op.pubkey().to_string();
     g.prefund.push(Prefund { pubkey: payer.pubkey().to_string(), lamports: LAMPORTS_PER_CNFA });
     let (mut a, _) = build(&g)?;
@@ -223,7 +253,7 @@ pub fn check_determinism(g: &GenesisConfig, n: u64, slot_ms: u64) -> Result<Hash
     for i in 1..=n {
         let to = Address::new_from_array([i as u8; 32]);
         let tx = transfer_tx(&payer, &to, 1_000_000 + i, a.last_hash);
-        let ex = a.produce(vec![tx], g.timestamp_ms + i * slot_ms, &op);
+        let ex = a.produce(vec![tx], g.timestamp_ms + i * g.slot_ms, &op);
         let ey = b.apply(&ex.block)?;
         if ey.block.hash() != ex.block.hash() {
             return Err(format!("blocco {i}: hash diverso"));

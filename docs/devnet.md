@@ -1,9 +1,7 @@
-# Test con Solflare su un nodo devnet
+# Nodo devnet su un VPS
 
-Obiettivo: verificare che Solflare funzioni con un nodo centrifuga, misurare la
-latenza dalla tua rete e scoprire, dal log, quali metodi RPC chiede davvero il
-wallet. **Non si aggiungono metodi in anticipo**: solo quelli che il log mostra come
-`NON_SUPPORTATO` e che servono a una voce della checklist che non funziona.
+Come installare un nodo centrifuga devnet con endpoint HTTPS pubblico e conti
+prefinanziati, e come misurare la latenza da una rete esterna.
 
 ## Requisiti minimi del VPS
 
@@ -28,8 +26,7 @@ node latency.mjs https://rpc.example.org bench.json
 ```
 
 Il comando crea `bench.json` (resta sul tuo computer, permessi 600) e stampa la
-pubkey da prefinanziare. Annota anche l'indirizzo del wallet Solflare da testare
-(dall'app: ricevi → copia indirizzo).
+pubkey da prefinanziare.
 
 ## 2. Sul VPS: installazione con un solo comando
 
@@ -38,7 +35,7 @@ ssh root@<ip-del-vps>
 git clone https://github.com/arabafenice599rae/nuova-chaine-.git /opt/centrifuga
 cd /opt/centrifuga
 deploy/devnet-install.sh --domain rpc.example.org --email tu@example.org \
-  --prefund <indirizzo Solflare>:100 --prefund <pubkey di bench.json>:10
+  --prefund <tuo indirizzo>:100 --prefund <pubkey di bench.json>:10
 ```
 
 (Con un utente non root: `sudo deploy/devnet-install.sh ...`.)
@@ -68,7 +65,7 @@ Comandi utili sul VPS:
 ```sh
 systemctl status centrifuga caddy
 journalctl -u centrifuga -f                      # blocchi con transazioni, errori
-centrifuga balance <indirizzo Solflare>          # "100 CnFA"
+centrifuga balance <tuo indirizzo>               # "100 CnFA"
 ```
 
 ## 3. Latenza dalla tua rete
@@ -95,29 +92,13 @@ Sul VPS, con la chiave del faucet generata dallo script:
 
 ```sh
 cd /opt/centrifuga/tests/web3 && npm ci
-sudo -u centrifuga node devnet-token.mjs http://127.0.0.1:8899 /var/lib/centrifuga/faucet.json <indirizzo Solflare>
+sudo -u centrifuga node devnet-token.mjs http://127.0.0.1:8899 /var/lib/centrifuga/faucet.json <tuo indirizzo>
 ```
 
 (Node.js sul VPS: `apt-get install -y nodejs npm`, oppure lanciare lo script dal tuo
 computer con una chiave prefinanziata anche lì.)
 
-## 5. Checklist Solflare
-
-Annotare per ogni voce: esito, cosa mostra Solflare, eventuali errori.
-
-- [ ] **Aggiunta del nodo**: nelle impostazioni di rete di Solflare, RPC
-      personalizzato `https://rpc.example.org`. Solflare lo accetta? Errori di rete?
-- [ ] **Saldo**: il wallet prefinanziato mostra 100. Con quale nome e simbolo?
-- [ ] **Ricezione**: inviare CnFA al wallet da un altro wallet. Il saldo si
-      aggiorna da solo (WebSocket) o serve ricaricare?
-- [ ] **Invio**: inviare 1 CnFA a un indirizzo nuovo. Fee mostrata prima della
-      conferma? Conferma rapida? La tx compare nello storico?
-- [ ] **Token SPL**: il token di prova compare con saldo 1.000? Invio di 10 token a
-      un altro indirizzo: riesce? (Senza metadati sarà mostrato come sconosciuto.)
-- [ ] **Nome mostrato per il token nativo**: ci aspettiamo "SOL" (i wallet non
-      leggono il campo `token` di `getVersion`). Annotare esattamente cosa compare.
-
-## 6. Raccolta dei risultati
+## 5. Metodi RPC ricevuti
 
 Sul VPS:
 
@@ -125,5 +106,3 @@ Sul VPS:
 cut -d' ' -f2- /var/lib/centrifuga/data/rpc.log | sort | uniq -c | sort -rn   # metodi ricevuti, con esito
 grep NON_SUPPORTATO /var/lib/centrifuga/data/rpc.log | cut -d' ' -f2,3 | sort -u
 ```
-
-Riportare i due output, la checklist compilata e l'output di `latency.mjs`.

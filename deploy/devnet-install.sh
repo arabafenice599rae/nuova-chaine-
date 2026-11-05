@@ -10,19 +10,22 @@
 # --reset cancella config e dati della chain (non le chiavi) e rifà il genesis.
 # Le chiavi private restano in /var/lib/centrifuga (permessi 600) e non vengono
 # mai stampate. CENTRIFUGA_SYSTEM=0 salta pacchetti, utente, systemd e Caddy (prove).
+# --tls-internal (SOLO per i test senza dominio pubblico): certificato della CA
+# locale di Caddy al posto di Let's Encrypt.
 set -euo pipefail
 umask 077
 
 die() { echo "errore: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
 
-DOMAIN="" EMAIL="" RESET=0 PREFUND=()
+DOMAIN="" EMAIL="" RESET=0 TLS_INTERNAL=0 PREFUND=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
     --email) EMAIL="$2"; shift 2 ;;
     --prefund) PREFUND+=("$2"); shift 2 ;;
     --reset) RESET=1; shift ;;
+    --tls-internal) TLS_INTERNAL=1; shift ;;
     *) die "opzione sconosciuta: $1" ;;
   esac
 done
@@ -95,6 +98,7 @@ else
   log "config devnet e prefund"
   now_ms=$(( $(date +%s) * 1000 ))
   sed -e 's/^network = .*/network = "devnet"/' \
+      -e 's/^chain_id = .*/chain_id = "centrifuga:devnet"/' \
       -e "s/^operator = .*/operator = \"$OPERATOR\"/" \
       -e "s/^timestamp_ms = .*/timestamp_ms = $now_ms/" \
       -e "s|^data_dir = .*|data_dir = \"$VAR/data\"|" \
@@ -144,12 +148,15 @@ UNIT
   systemctl restart centrifuga
 
   log "HTTPS con Caddy e Let's Encrypt"
+  TLS_LINE="	# certificato Let's Encrypt automatico"
+  if [ "$TLS_INTERNAL" = 1 ]; then TLS_LINE="	tls internal # SOLO TEST: CA locale di Caddy"; fi
   cat > /etc/caddy/Caddyfile <<CADDY
 {
 	email $EMAIL
 }
 
 $DOMAIN {
+${TLS_LINE}
 	# Stream per bot e repliche: wss://$DOMAIN/stream?from_height=...
 	handle /stream* {
 		reverse_proxy 127.0.0.1:8901
@@ -175,15 +182,16 @@ CADDY
   log "controllo"
   for _ in $(seq 30); do curl -sf http://127.0.0.1:8899/health > /dev/null && break; sleep 1; done
   curl -sf http://127.0.0.1:8899/health > /dev/null || die "il nodo non risponde: journalctl -u centrifuga"
-  ok=0
-  for _ in $(seq 60); do curl -sf "https://$DOMAIN/health" > /dev/null && { ok=1; break; }; sleep 2; done
+  ok=0 CA=()
+  if [ "$TLS_INTERNAL" = 1 ]; then CA=(--cacert /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt); fi
+  for _ in $(seq 60); do curl -sf "${CA[@]}" "https://$DOMAIN/health" > /dev/null 2>&1 && { ok=1; break; }; sleep 2; done
   [ "$ok" = 1 ] || echo "attenzione: https://$DOMAIN non risponde ancora (DNS? porte 80/443?): journalctl -u caddy"
 fi
 
 cat <<FINE
 
 Nodo devnet pronto.
-  RPC (Solflare):  https://${DOMAIN:-<dominio>}
+  RPC:             https://${DOMAIN:-<dominio>}
   WebSocket:       wss://${DOMAIN:-<dominio>}
   Stream:          wss://${DOMAIN:-<dominio>}/stream
   Operatore:       $OPERATOR

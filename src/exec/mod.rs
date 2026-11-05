@@ -4,7 +4,7 @@
 pub mod litesvm_internal;
 pub mod state_hash;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use solana_account::{Account, ReadableAccount};
 use solana_address::Address;
@@ -27,7 +27,8 @@ pub use litesvm::types::TransactionResult;
 pub struct Params {
     pub operator: Address,
     pub lamports_per_signature: u64,
-    /// Validità di un blockhash, in blocchi (N).
+    /// Validità di un blockhash, in slot (N): il blockhash del blocco all'altezza h
+    /// vale nei blocchi fino all'altezza h + N.
     pub blockhash_window: usize,
     /// Fee mining: premio massimo per blocco all'altezza 0.
     pub block_budget: u64,
@@ -36,6 +37,70 @@ pub struct Params {
     /// Da questa altezza (o a vault "mining" vuoto) il fee mining finisce.
     pub mining_end_height: u64,
     pub vaults: Vaults,
+    pub rules: Rules,
+    pub identity: Identity,
+}
+
+/// Identità della chain, fissata nel genesis (e nel suo hash).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// "centrifuga:mainnet" o "centrifuga:devnet".
+    pub chain_id: String,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+/// Regole di validità dell'header tra un blocco e il successivo (parte del genesis).
+#[derive(Clone, Copy, Debug)]
+pub struct Rules {
+    pub slot_ms: u64,
+    /// Salto massimo di altezza tra due blocchi (e cadenza dell'heartbeat).
+    pub heartbeat_slots: u64,
+}
+
+impl Rules {
+    /// Timestamp minimo per un blocco `gap` slot dopo il precedente.
+    pub fn min_timestamp(&self, prev_ts: u64, gap: u64) -> u64 {
+        prev_ts + (gap * self.slot_ms / 2).max(1)
+    }
+
+    /// 1 <= gap <= heartbeat_slots e timestamp - precedente >= gap * slot_ms / 2.
+    pub fn check(&self, prev_height: u64, prev_ts: u64, h: &Header) -> Result<(), String> {
+        let gap = h.height.checked_sub(prev_height).filter(|g| (1..=self.heartbeat_slots).contains(g));
+        let Some(gap) = gap else {
+            return Err(format!("blocco {}: salto di altezza da {prev_height} fuori da 1..={}", h.height, self.heartbeat_slots));
+        };
+        if h.timestamp_ms < self.min_timestamp(prev_ts, gap) {
+            return Err(format!("blocco {}: timestamp {} troppo vicino al precedente {prev_ts} (salto {gap})", h.height, h.timestamp_ms));
+        }
+        Ok(())
+    }
+}
+
+impl Params {
+    /// Hash dei parametri di consenso: entra nel genesis hash (prev_hash del blocco 0).
+    pub fn hash(&self) -> Hash {
+        use sha2::{Digest, Sha256};
+        let mut d = Sha256::new();
+        d.update(self.operator.as_ref());
+        for x in [
+            self.lamports_per_signature, self.blockhash_window as u64, self.block_budget, self.halving_blocks,
+            self.mining_end_height, self.rules.slot_ms, self.rules.heartbeat_slots,
+        ] {
+            d.update(x.to_le_bytes());
+        }
+        for v in [&self.vaults.mining, &self.vaults.airdrop, &self.vaults.reserve] {
+            d.update(v.as_ref());
+        }
+        let id = &self.identity;
+        for s in [&id.chain_id, &id.name, &id.symbol] {
+            d.update((s.len() as u32).to_le_bytes());
+            d.update(s.as_bytes());
+        }
+        d.update([id.decimals]);
+        Hash::new_from_array(d.finalize().into())
+    }
 }
 
 /// Vault che il nodo muove direttamente (regole di fee nel nodo).
@@ -84,8 +149,9 @@ pub struct Chain {
     pub last_ts: u64,
     pub genesis_hash: Hash,
     /// Ultimi N blocchi: (hash, firme incluse).
-    window: VecDeque<(Hash, Vec<Signature>)>,
-    hashes: HashSet<Hash>,
+    window: VecDeque<(u64, Hash, Vec<Signature>)>,
+    /// blockhash -> altezza del blocco.
+    hashes: HashMap<Hash, u64>,
     seen: HashSet<Signature>,
     hasher: Box<dyn StateHasher>,
 }
@@ -115,21 +181,22 @@ impl Chain {
             last_ts,
             genesis_hash,
             window: VecDeque::new(),
-            hashes: HashSet::new(),
+            hashes: HashMap::new(),
             seen: HashSet::new(),
             hasher: Box::new(FullSha256),
         };
-        c.push_window(last_hash, Vec::new());
+        c.push_window(height, last_hash, Vec::new());
         c
     }
 
     /// Stato di genesis: il "blocco 0" non è firmato e non sta nel journal.
     pub fn genesis(svm: Svm, params: Params, timestamp_ms: u64) -> Chain {
+        let params_hash = params.hash();
         let mut c = Chain::new(svm, params, 0, Hash::default(), timestamp_ms, Hash::default());
         let g = Block {
             header: Header {
                 height: 0,
-                prev_hash: Hash::default(),
+                prev_hash: params_hash,
                 timestamp_ms,
                 state_hash: c.state_hash(&BTreeSet::new()),
                 signature: Signature::default(),
@@ -139,7 +206,7 @@ impl Chain {
         let h = g.hash();
         c.window.clear();
         c.hashes.clear();
-        c.push_window(h, Vec::new());
+        c.push_window(0, h, Vec::new());
         c.last_hash = h;
         c.genesis_hash = h;
         c
@@ -149,12 +216,18 @@ impl Chain {
         self.hasher.hash(self.svm.accounts(), changed)
     }
 
-    fn push_window(&mut self, h: Hash, sigs: Vec<Signature>) {
+    fn push_window(&mut self, height: u64, h: Hash, sigs: Vec<Signature>) {
         self.seen.extend(sigs.iter().copied());
-        self.hashes.insert(h);
-        self.window.push_back((h, sigs));
-        while self.window.len() > self.params.blockhash_window {
-            let (h, sigs) = self.window.pop_front().unwrap();
+        self.hashes.insert(h, height);
+        self.window.push_back((height, h, sigs));
+    }
+
+    /// Prima di un blocco all'altezza `height`: scadono i blockhash (e le firme
+    /// dei loro blocchi) più vecchi di N slot.
+    fn expire(&mut self, height: u64) {
+        let n = self.params.blockhash_window as u64;
+        while self.window.front().is_some_and(|w| w.0 + n < height) {
+            let (_, h, sigs) = self.window.pop_front().unwrap();
             self.hashes.remove(&h);
             for s in sigs {
                 self.seen.remove(&s);
@@ -162,22 +235,44 @@ impl Chain {
         }
     }
 
-    /// Registra un blocco già incluso nello snapshot (solo finestra, nessuna esecuzione).
-    pub fn note_block(&mut self, b: &Block) {
+    /// Registra un blocco già incluso nello snapshot: nessuna esecuzione, ma
+    /// concatenamento, regole dell'header e firma sono verificati come in `apply`.
+    pub fn note_block(&mut self, b: &Block) -> Result<(), String> {
+        self.check_header(b)?;
         self.height = b.header.height;
         self.last_ts = b.header.timestamp_ms;
         self.last_hash = b.hash();
-        self.push_window(self.last_hash, b.txs.iter().map(|t| t.signatures[0]).collect());
+        self.push_window(self.height, self.last_hash, b.txs.iter().map(|t| t.signatures[0]).collect());
+        self.expire(self.height + 1);
+        Ok(())
+    }
+
+    /// Concatenamento, regole di altezza e timestamp, firma dell'operatore.
+    fn check_header(&self, b: &Block) -> Result<(), String> {
+        let h = &b.header;
+        if h.prev_hash != self.last_hash {
+            return Err(format!("blocco {}: header non concatenato", h.height));
+        }
+        self.params.rules.check(self.height, self.last_ts, h)?;
+        if !b.verify_signature(&self.params.operator) {
+            return Err(format!("blocco {}: firma operatore invalida", h.height));
+        }
+        Ok(())
     }
 
     /// Controlli del nodo prima dell'esecuzione: duplicati, blockhash, durable nonce.
+    /// Per il prossimo blocco possibile (altezza + 1); in un blocco: `check_at`.
     pub fn check(&self, tx: &VersionedTransaction) -> Result<Nonce, TransactionError> {
+        self.check_at(tx, self.height + 1)
+    }
+
+    fn check_at(&self, tx: &VersionedTransaction, height: u64) -> Result<Nonce, TransactionError> {
         let sig = tx.signatures.first().ok_or(TransactionError::SanitizeFailure)?;
         if self.seen.contains(sig) {
             return Err(TransactionError::AlreadyProcessed);
         }
         let bh = tx.message.recent_blockhash();
-        if self.hashes.contains(bh) {
+        if self.hashes.get(bh).is_some_and(|h| h + self.params.blockhash_window as u64 >= height) {
             return Ok(None);
         }
         self.check_nonce(tx).map(Some).ok_or(TransactionError::BlockhashNotFound)
@@ -295,14 +390,14 @@ impl Chain {
     }
 
     /// Esegue un blocco. `strict` = riesecuzione: ogni tx deve essere includibile.
-    fn run(&mut self, ts: u64, txs: Vec<VersionedTransaction>, strict: bool) -> Result<Executed, String> {
-        let height = self.height + 1;
+    fn run(&mut self, height: u64, ts: u64, txs: Vec<VersionedTransaction>, strict: bool) -> Result<Executed, String> {
+        self.expire(height);
         self.svm.begin_block(height, (ts / 1000) as i64, self.last_hash);
         let mut changed = BTreeSet::from([sysvar::clock::id()]);
         let (mut included, mut results, mut sigs, mut balances) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut paid = Vec::new();
         for tx in txs {
-            let nonce = match self.check(&tx) {
+            let nonce = match self.check_at(&tx, height) {
                 Ok(n) => n,
                 Err(e) if strict => return Err(format!("tx {} rifiutata: {e}", tx.signatures[0])),
                 Err(_) => continue,
@@ -346,13 +441,21 @@ impl Chain {
 
     fn finish(&mut self, ex: &Executed) {
         self.last_hash = ex.block.hash();
-        self.push_window(self.last_hash, ex.block.txs.iter().map(|t| t.signatures[0]).collect());
+        self.push_window(ex.block.header.height, self.last_hash, ex.block.txs.iter().map(|t| t.signatures[0]).collect());
     }
 
-    /// Operatore: costruisce, esegue e firma il blocco successivo.
+    /// Operatore: costruisce, esegue e firma il blocco all'altezza successiva.
     pub fn produce(&mut self, txs: Vec<VersionedTransaction>, now_ms: u64, kp: &Keypair) -> Executed {
-        let ts = now_ms.max(self.last_ts + 1);
-        let mut ex = self.run(ts, txs, false).expect("produzione non strict");
+        self.produce_at(self.height + 1, txs, now_ms, kp)
+    }
+
+    /// Operatore: blocco all'altezza `height` (salto di 1..=heartbeat_slots slot).
+    /// Timestamp = max(ora, precedente + salto × slot_ms / 2, precedente + 1).
+    pub fn produce_at(&mut self, height: u64, txs: Vec<VersionedTransaction>, now_ms: u64, kp: &Keypair) -> Executed {
+        let gap = height.saturating_sub(self.height);
+        assert!((1..=self.params.rules.heartbeat_slots).contains(&gap), "salto di altezza {gap} fuori dalle regole");
+        let ts = now_ms.max(self.params.rules.min_timestamp(self.last_ts, gap));
+        let mut ex = self.run(height, ts, txs, false).expect("produzione non strict");
         ex.block.sign(kp);
         self.finish(&ex);
         ex
@@ -361,17 +464,12 @@ impl Chain {
     /// Chiunque: riesegue un blocco firmato e verifica header e hash di stato.
     pub fn apply(&mut self, b: &Block) -> Result<Executed, String> {
         let h = &b.header;
-        if h.height != self.height + 1 || h.prev_hash != self.last_hash || h.timestamp_ms <= self.last_ts {
-            return Err(format!("blocco {}: header non concatenato", h.height));
-        }
-        if !b.verify_signature(&self.params.operator) {
-            return Err(format!("blocco {}: firma operatore invalida", h.height));
-        }
+        self.check_header(b)?;
         let valid = crate::ingress::verify_signatures(&b.txs);
         if valid.iter().any(|ok| !ok) {
             return Err(format!("blocco {}: firma tx invalida", h.height));
         }
-        let mut ex = self.run(h.timestamp_ms, b.txs.clone(), true)?;
+        let mut ex = self.run(h.height, h.timestamp_ms, b.txs.clone(), true)?;
         if ex.block.header.state_hash != h.state_hash {
             return Err(format!("blocco {}: hash di stato diverso", h.height));
         }
@@ -380,8 +478,9 @@ impl Chain {
         Ok(ex)
     }
 
+    /// Valido per il prossimo blocco possibile (altezza + 1).
     pub fn blockhash_valid(&self, h: &Hash) -> bool {
-        self.hashes.contains(h)
+        self.hashes.get(h).is_some_and(|x| x + self.params.blockhash_window as u64 > self.height)
     }
 
     pub fn total_lamports(&self) -> u128 {

@@ -1,4 +1,4 @@
-// Crea un token SPL di prova e ne invia 1.000 al wallet indicato (per il test con Solflare).
+// Crea un token SPL di prova e ne invia 1.000 al wallet indicato (per i test su devnet).
 // Uso: node devnet-token.mjs <url-rpc> <keypair-prefinanziato.json> <pubkey-wallet>
 import fs from "node:fs";
 import * as web3 from "@solana/web3.js";

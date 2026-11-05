@@ -126,6 +126,12 @@ async fn handle(gw: Gateway, peer: IpAddr, req: Request<Incoming>) -> Result<Res
     if req.method() == Method::GET && req.uri().path() == "/health" {
         return Ok(reply(StatusCode::OK, b"ok".to_vec()));
     }
+    if req.method() == Method::GET && req.uri().path() == "/chain.json" {
+        return Ok(match gw.query(|n| methods::chain_info(n)).await {
+            Some(v) => reply(StatusCode::OK, serde_json::to_vec(&v).unwrap()),
+            None => reply(StatusCode::SERVICE_UNAVAILABLE, vec![]),
+        });
+    }
     let Ok(body) = Limited::new(req.into_body(), MAX_BODY).collect().await else {
         return Ok(reply(StatusCode::PAYLOAD_TOO_LARGE, vec![]));
     };

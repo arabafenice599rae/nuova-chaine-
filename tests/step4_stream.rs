@@ -22,13 +22,16 @@ const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 fn config(name: &str, port: u16, op: &Keypair, user: &Keypair, f: impl FnOnce(&mut Config)) -> Config {
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
+    cfg.genesis.timestamp_ms = node::now_ms() - 86_400_000; // la replica rifiuta il futuro
     cfg.genesis.prefund.push(Prefund { pubkey: user.pubkey().to_string(), lamports: 100 * LAMPORTS_PER_CNFA });
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     cfg.node.data_dir = dir;
     cfg.node.rpc_addr = format!("127.0.0.1:{port}");
     cfg.node.stream_addr = format!("127.0.0.1:{}", port + 2);
+    cfg.genesis.heartbeat_slots = 1; // qui si testa lo stream: un blocco a ogni slot
     f(&mut cfg);
     cfg
 }
@@ -79,13 +82,14 @@ async fn follow(ws: &mut Ws, rep: &mut Replica, until: u64) -> Vec<&'static str>
 async fn replica_rebuilds_state_from_stream_only() {
     let (op, user) = (Keypair::new(), Keypair::new());
     let cfg = config("stream_replica", 19100, &op, &user, |c| {
-        c.node.slot_ms = 20;
+        c.genesis.slot_ms = 20;
         c.node.stream_catchup_blocks = 200;
     });
     let url = format!("ws://{}/", cfg.node.stream_addr);
+    let rules = cfg.genesis.params().unwrap().rules;
     let gw = start(cfg, &op).await;
     let to = Address::new_unique();
-    let mut rep = Replica::new(op.pubkey());
+    let mut rep = Replica::new(op.pubkey(), rules);
 
     // 1. Client nuovo: stato completo, poi blocchi live con delta (hash verificato a ogni blocco).
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -125,11 +129,12 @@ async fn replica_rebuilds_state_from_stream_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tampered_stream_is_rejected() {
     let (op, user) = (Keypair::new(), Keypair::new());
-    let cfg = config("stream_tamper", 19110, &op, &user, |c| c.node.slot_ms = 20);
+    let cfg = config("stream_tamper", 19110, &op, &user, |c| c.genesis.slot_ms = 20);
     let url = format!("ws://{}/", cfg.node.stream_addr);
+    let rules = cfg.genesis.params().unwrap().rules;
     let _gw = start(cfg, &op).await;
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    let mut rep = Replica::new(op.pubkey());
+    let mut rep = Replica::new(op.pubkey(), rules);
     async fn next(ws: &mut Ws) -> String {
         loop {
             if let Some(Ok(Message::Text(t))) = ws.next().await {
@@ -137,12 +142,13 @@ async fn tampered_stream_is_rejected() {
             }
         }
     }
+    rep.apply(&next(&mut ws).await).unwrap(); // identità della chain
     rep.apply(&next(&mut ws).await).unwrap(); // blocco di ancoraggio
     rep.apply(&next(&mut ws).await).unwrap(); // sync completo
     let good = next(&mut ws).await;
     let mut v: Value = serde_json::from_str(&good).unwrap();
     v["accounts"][0]["lamports"] = Value::from(v["accounts"][0]["lamports"].as_u64().unwrap() + 1);
-    let mut other = Replica::new(Keypair::new().pubkey());
+    let mut other = Replica::new(Keypair::new().pubkey(), rules);
     assert!(other.apply(&good).unwrap_err().contains("firma"), "operatore sbagliato");
     assert!(rep.apply(&v.to_string()).unwrap_err().contains("hash di stato"), "delta alterato");
 }
@@ -151,7 +157,7 @@ async fn tampered_stream_is_rejected() {
 async fn slow_client_is_dropped_without_slowing_blocks() {
     let (op, user) = (Keypair::new(), Keypair::new());
     let cfg = config("stream_slow", 19120, &op, &user, |c| {
-        c.node.slot_ms = 10;
+        c.genesis.slot_ms = 10;
         c.node.stream_max_lag_blocks = 5;
     });
     let addr = cfg.node.stream_addr.clone();
@@ -190,7 +196,9 @@ async fn slow_client_is_dropped_without_slowing_blocks() {
         while let Some(Ok(m)) = ws.next().await {
             if let Message::Text(t) = m {
                 let v: Value = serde_json::from_str(&t).unwrap();
-                last = v["header"]["height"].as_u64().or(v["height"].as_u64()).unwrap();
+                if v["type"] != "chain" {
+                    last = v["header"]["height"].as_u64().or(v["height"].as_u64()).unwrap();
+                }
             }
         }
     })
@@ -244,7 +252,7 @@ async fn balance_cli_prints_token_amount() {
 #[tokio::test(flavor = "multi_thread")]
 async fn node_latency_is_reported_by_get_transaction() {
     let (op, user) = (Keypair::new(), Keypair::new());
-    let cfg = config("node_latency", 19140, &op, &user, |c| c.node.slot_ms = 50);
+    let cfg = config("node_latency", 19140, &op, &user, |c| c.genesis.slot_ms = 50);
     let url = format!("http://{}", cfg.node.rpc_addr);
     let gw = start(cfg, &op).await;
     let tx = transfer_tx(&user, &Address::new_unique(), LAMPORTS_PER_CNFA, height(&gw).await.1);

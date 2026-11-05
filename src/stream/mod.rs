@@ -70,6 +70,11 @@ fn snapshot(n: &Node, keys: impl IntoIterator<Item = Address>) -> Accounts {
     keys.into_iter().map(|k| (k, n.chain.svm.get(&k).cloned())).collect()
 }
 
+/// Messaggio "solo header e corpo" (come nel recupero dal journal).
+pub fn header_message(b: &Block) -> String {
+    block_json(b, None).to_string()
+}
+
 /// Messaggio live per un blocco appena prodotto (sul thread del nodo).
 pub fn block_message(n: &Node, ex: &Executed) -> String {
     block_json(&ex.block, Some(&snapshot(n, ex.changed.iter().copied()))).to_string()
@@ -87,6 +92,8 @@ pub struct Stream {
 
 /// Cosa serve a un client per mettersi in pari, preso dal nodo in un colpo solo.
 struct Catchup {
+    /// Primo messaggio: identità della chain (chain_id e genesis hash).
+    chain: String,
     height: u64,
     journal: PathBuf,
     /// Offset nel journal dei blocchi da rimandare.
@@ -109,7 +116,8 @@ fn catchup(n: &Node, from: u64) -> Option<Catchup> {
         let all = n.chain.svm.accounts().iter().map(|(k, a)| (*k, Some(a.clone()))).collect();
         (vec![last], true, all)
     };
-    Some(Catchup { height, journal: n.journal_path(), offsets, full, accounts })
+    let chain = json!({"type": "chain", "chainId": n.chain.params.identity.chain_id, "genesisHash": n.chain.genesis_hash.to_string()});
+    Some(Catchup { chain: chain.to_string(), height, journal: n.journal_path(), offsets, full, accounts })
 }
 
 pub async fn serve(s: Stream, addr: SocketAddr) -> std::io::Result<()> {
@@ -151,11 +159,11 @@ async fn conn(s: Stream, c: tokio::net::TcpStream) {
     let height = cu.height;
     let msgs = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
         let mut f = std::fs::File::open(&cu.journal).map_err(|e| e.to_string())?;
-        let mut out = Vec::new();
+        let mut out = vec![cu.chain];
         for off in cu.offsets {
             out.push(block_json(&crate::ledger::read_block_at(&mut f, off)?, None).to_string());
         }
-        if !out.is_empty() {
+        if out.len() > 1 {
             let accounts: Vec<Value> = cu.accounts.iter().map(|(k, a)| account_json(k, a.as_ref())).collect();
             out.push(json!({"type": "sync", "height": cu.height, "full": cu.full, "accounts": accounts}).to_string());
         }
@@ -202,6 +210,15 @@ pub struct Replica {
     last_state: Hash,
     /// Nuova ancora non contigua (recupero oltre la finestra): serve uno stato completo.
     needs_full: bool,
+    last_ts: u64,
+    /// Regole di altezza e timestamp del genesis.
+    pub rules: crate::exec::Rules,
+    /// In tempo reale: rifiuta timestamp oltre questo margine nel futuro (None = storico).
+    pub max_future_ms: Option<u64>,
+    /// Identità attesa (chain_id, genesis hash): se impostata, il primo messaggio
+    /// deve essere quello di identità e coincidere, altrimenti il nodo è rifiutato.
+    pub expected_chain: Option<(String, Hash)>,
+    chain_checked: bool,
     pub accounts: HashMap<Address, AccountSharedData>,
 }
 
@@ -218,8 +235,27 @@ fn decode64(s: &str) -> Result<Vec<u8>, String> {
 }
 
 impl Replica {
-    pub fn new(operator: Address) -> Replica {
-        Replica { operator, height: 0, last_hash: Hash::default(), last_state: Hash::default(), needs_full: false, accounts: HashMap::new() }
+    /// Replica in tempo reale: rifiuta i blocchi con timestamp oltre 5 s nel futuro.
+    pub fn new(operator: Address, rules: crate::exec::Rules) -> Replica {
+        Replica {
+            operator,
+            height: 0,
+            last_hash: Hash::default(),
+            last_state: Hash::default(),
+            needs_full: false,
+            last_ts: 0,
+            rules,
+            max_future_ms: Some(5_000),
+            expected_chain: None,
+            chain_checked: false,
+            accounts: HashMap::new(),
+        }
+    }
+
+    /// Rifiuta un nodo con chain_id o genesis hash diversi da questi.
+    pub fn expect_chain(mut self, chain_id: &str, genesis_hash: Hash) -> Replica {
+        self.expected_chain = Some((chain_id.to_string(), genesis_hash));
+        self
     }
 
     pub fn state_hash(&self) -> Hash {
@@ -254,7 +290,21 @@ impl Replica {
     /// Applica un messaggio dello stream; errore = stream non valido o manomesso.
     pub fn apply(&mut self, msg: &str) -> Result<(), String> {
         let v: Value = serde_json::from_str(msg).map_err(|e| e.to_string())?;
-        match field(&v, "type")?.as_str() {
+        let kind = field(&v, "type")?.as_str();
+        if kind == Some("chain") {
+            let got = (field(&v, "chainId")?.as_str().unwrap_or("").to_string(), parse::<Hash>(&v, "genesisHash")?);
+            if let Some(exp) = &self.expected_chain {
+                if &got != exp {
+                    return Err(format!("nodo di un'altra chain: {} {} (attesa {} {})", got.0, got.1, exp.0, exp.1));
+                }
+            }
+            self.chain_checked = true;
+            return Ok(());
+        }
+        if self.expected_chain.is_some() && !self.chain_checked {
+            return Err("identità della chain mancante: il nodo non l'ha dichiarata".into());
+        }
+        match kind {
             Some("block") => {
                 let h = field(&v, "header")?;
                 let header = Header {
@@ -272,17 +322,26 @@ impl Replica {
                 if !block.verify_signature(&self.operator) {
                     return Err(format!("blocco {}: firma non valida", block.header.height));
                 }
-                // Un blocco solo header non contiguo è una nuova ancora (firmata
-                // dall'operatore): vale solo se segue uno stato completo.
+                let h = &block.header;
+                if let Some(max) = self.max_future_ms {
+                    if h.timestamp_ms > crate::node::now_ms() + max {
+                        return Err(format!("blocco {}: timestamp nel futuro", h.height));
+                    }
+                }
+                // Blocco concatenato (stesso prev_hash): valgono le regole di altezza e
+                // timestamp. Un blocco solo header con prev_hash diverso è una nuova ancora
+                // (recupero oltre la finestra): vale solo se segue uno stato completo.
                 let accounts = field(&v, "accounts")?;
                 let anchored = self.height > 0 || self.last_hash != Hash::default();
-                let contiguous = block.header.height == self.height + 1 && block.header.prev_hash == self.last_hash;
-                if anchored && !contiguous {
-                    if !accounts.is_null() || block.header.height <= self.height {
-                        return Err(format!("blocco {}: non concatenato a {}", block.header.height, self.height));
+                if anchored && h.prev_hash == self.last_hash {
+                    self.rules.check(self.height, self.last_ts, h)?;
+                } else if anchored {
+                    if !accounts.is_null() || h.height <= self.height {
+                        return Err(format!("blocco {}: non concatenato a {}", h.height, self.height));
                     }
                     self.needs_full = true;
                 }
+                self.last_ts = h.timestamp_ms;
                 if self.needs_full && !accounts.is_null() {
                     return Err("delta ricevuto prima dello stato completo".into());
                 }

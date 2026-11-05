@@ -11,6 +11,8 @@ use solana_signer::Signer;
 
 const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 const DAY: u64 = 86_400_000;
+/// Fine del fee mining dopo i 6 giorni simulati (2 blocchi al giorno, salto massimo 10).
+const END: u64 = 200;
 
 /// Ogni voce: (chi, in lista airdrop, tx riuscite, giorni distinti).
 #[test]
@@ -25,8 +27,9 @@ fn eligibility_from_journal() {
     ];
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
-    cfg.genesis.fee_mining_end_height = 40;
+    cfg.genesis.fee_mining_end_height = END;
     for (k, ..) in &users {
         cfg.genesis.prefund.push(Prefund { pubkey: k.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
     }
@@ -38,6 +41,9 @@ fn eligibility_from_journal() {
     // Le tx di ciascuno sono spalmate sui suoi giorni (un giorno = un salto di timestamp).
     let t0 = cfg.genesis.timestamp_ms;
     for day in 0..6u64 {
+        // Blocco heartbeat all'inizio del giorno: le tx usano un blockhash recente
+        // (la finestra è di 300 slot, i giorni sono 864.000 slot l'uno dall'altro).
+        node.tick(t0 + day * DAY + 500).unwrap();
         let mut txs = Vec::new();
         for (u, (k, _, n, days)) in users.iter().enumerate() {
             if day >= *days {
@@ -59,7 +65,7 @@ fn eligibility_from_journal() {
     let tx = solana_transaction::versioned::VersionedTransaction::try_new(solana_message::VersionedMessage::Legacy(msg), &[k0]).unwrap();
     node.ingress.submit(None, vec![tx]);
     let mut t = t0 + 6 * DAY;
-    while node.chain.height <= 40 {
+    while node.chain.height < END {
         t += 100;
         node.tick(t).unwrap();
     }
@@ -72,7 +78,7 @@ fn eligibility_from_journal() {
     let mut expected = vec![users[0].0.pubkey(), users[1].0.pubkey()];
     expected.sort();
     assert_eq!(e.eligible, expected);
-    assert_eq!(e.end_height, 40);
+    assert_eq!(e.end_height, END);
     assert_eq!(e.residual, residual, "residuo = quanto è passato da mining ad airdrop");
     assert_eq!(e.quota, MAX_QUOTA, "il residuo (~30M) supera 1.000 CnFA a testa");
     assert_eq!(e.unassigned, residual - 2 * MAX_QUOTA);

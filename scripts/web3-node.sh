@@ -13,7 +13,9 @@ trap 'kill "$NODE" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 "$BIN/examples/keygen" > "$WORK/user.json" 2> "$WORK/user.txt"
 sed -e "s/SOSTITUIRE_CON_PUBKEY_OPERATORE/$(cut -d' ' -f2 "$WORK/op.txt")/" \
     -e 's/network = "mainnet"/network = "devnet"/' \
+    -e 's/chain_id = "centrifuga:mainnet"/chain_id = "centrifuga:devnet"/' \
     -e "s/^slot_ms = .*/slot_ms = $SLOT/" \
+    -e "s/^timestamp_ms = .*/timestamp_ms = $(( $(date +%s) * 1000 ))/" \
     -e "s|^data_dir = .*|data_dir = \"$WORK/data\"|" \
     -e "s|^operator_keypair = .*|operator_keypair = \"$WORK/operator.json\"|" \
     -e 's/^rpc_log = false/rpc_log = true/' \
@@ -22,8 +24,10 @@ printf '\n[[genesis.prefund]]\npubkey = "%s"\nlamports = 100000000000\n' "$(cut 
 
 "$BIN/centrifuga" run "$WORK/centrifuga.toml" > "$WORK/node.log" 2>&1 &
 NODE=$!
+# Pronto quando risponde e ha prodotto almeno un blocco.
 for _ in $(seq 50); do
-  curl -sf http://127.0.0.1:8899/health > /dev/null && break
+  curl -sf http://127.0.0.1:8899 -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' | grep -qv '"result":0' && break
   sleep 0.2
 done
 cd "$ROOT/tests/web3"

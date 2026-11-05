@@ -25,8 +25,17 @@ pub const METHODS: &[&str] = &[
     "getBlockHeight", "getSlot", "getFeeForMessage", "simulateTransaction", "sendTransaction",
     "getSignatureStatuses", "getTransaction", "getVersion", "getHealth", "getMinimumBalanceForRentExemption",
     "getSignaturesForAddress", "getTokenAccountBalance", "getRecentPrioritizationFees", "isBlockhashValid",
-    "getEpochInfo", "getGenesisHash",
+    "getEpochInfo", "getGenesisHash", "getChainInfo",
 ];
+
+/// Identità della chain (getChainInfo e GET /chain.json): dal genesis, tranne il logo.
+pub fn chain_info(n: &Node) -> Value {
+    let id = &n.chain.params.identity;
+    json!({
+        "chainId": id.chain_id, "name": id.name, "symbol": id.symbol, "decimals": id.decimals,
+        "genesisHash": n.chain.genesis_hash.to_string(), "logoUrl": n.cfg.node.logo_url,
+    })
+}
 
 pub struct RpcError {
     pub code: i64,
@@ -141,11 +150,13 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         "getHealth" => json!("ok"),
         "getSlot" | "getBlockHeight" => json!(height),
         "getGenesisHash" => json!(n.chain.genesis_hash.to_string()),
+        "getChainInfo" => chain_info(n),
         "getVersion" => {
-            let c = &n.cfg.node;
+            let id = &n.chain.params.identity;
             json!({
                 "solana-core": SVM_VERSION, "feature-set": 0, "centrifuga": env!("CARGO_PKG_VERSION"),
-                "token": {"name": c.token_name, "symbol": c.token_symbol, "decimals": 9},
+                "token": {"name": id.name, "symbol": id.symbol, "decimals": id.decimals},
+                "chainId": id.chain_id,
             })
         }
         // Nessuna epoca: epoch 0 e slotsInEpoch = massimo intero sicuro in JavaScript.
