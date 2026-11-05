@@ -89,20 +89,6 @@ fn account_at(n: &Node, k: &Address, c: &Value) -> R {
     }
 }
 
-/// Fee base: firme della tx + firme verificate dalle precompile. La priority
-/// fee non conta (viene rimborsata).
-fn base_fee(n: &Node, m: &VersionedMessage) -> u64 {
-    let keys = m.static_account_keys();
-    let pre = ["Ed25519SigVerify111111111111111111111111111", "KeccakSecp256k11111111111111111111111111111", "Secp256r1SigVerify1111111111111111111111111"];
-    let extra: u64 = m
-        .instructions()
-        .iter()
-        .filter(|ix| keys.get(ix.program_id_index as usize).is_some_and(|k| pre.contains(&k.to_string().as_str())))
-        .map(|ix| *ix.data.first().unwrap_or(&0) as u64)
-        .sum();
-    (m.header().num_required_signatures as u64 + extra) * n.chain.params.lamports_per_signature
-}
-
 fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     match n.chain.svm.simulate(tx) {
         Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": null}),
@@ -210,7 +196,7 @@ pub fn call(n: &mut Node, method: &str, p: &Value) -> R {
         "getFeeForMessage" => {
             let bytes = decode(&arg::<String>(p, 0)?, Some("base64"))?;
             let m: VersionedMessage = wincode::deserialize(&bytes).map_err(|e| invalid(format!("messaggio: {e}")))?;
-            let fee = n.chain.blockhash_valid(m.recent_blockhash()).then(|| base_fee(n, &m));
+            let fee = n.chain.blockhash_valid(m.recent_blockhash()).then(|| crate::exec::base_fee(&m, n.chain.params.lamports_per_signature));
             ctx(n, json!(fee))
         }
         "simulateTransaction" => {

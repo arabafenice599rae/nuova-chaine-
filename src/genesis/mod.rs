@@ -13,7 +13,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
 use crate::exec::litesvm_internal::Svm;
-use crate::exec::{Chain, Params};
+use crate::exec::{Chain, Params, Vaults};
 
 pub const LAMPORTS_PER_CNFA: u64 = 1_000_000_000;
 pub const SUPPLY_LAMPORTS: u64 = 100_000_000 * LAMPORTS_PER_CNFA;
@@ -28,16 +28,21 @@ pub fn vault_address(name: &str) -> Address {
     Address::find_program_address(&[b"vault", name.as_bytes()], &timelock_program_id()).0
 }
 
-/// Layout del vault (condiviso con programs/timelock):
-/// beneficiario(32) totale(8) inizio(8) fine(8) prelevato(8).
-pub const VAULT_LEN: usize = 64;
+/// Vault nel genesis: airdrop, mining, operator, reserve.
+pub const VAULTS: u64 = 4;
+pub const VAULT_NAMES: [&str; 4] = ["airdrop", "mining", "operator", "reserve"];
 
-pub fn vault_data(beneficiary: &Address, total: u64, start: u64, end: u64) -> Vec<u8> {
-    let mut d = Vec::with_capacity(VAULT_LEN);
+/// Layout del vault: definito dal programma timelock (`centrifuga_timelock`).
+pub use centrifuga_timelock::VAULT_LEN;
+
+pub fn vault_data(kind: u8, beneficiary: &Address, authority: &Address, total: u64, start: u64, end: u64) -> Vec<u8> {
+    let mut d = vec![centrifuga_timelock::VAULT_TAG, kind];
     d.extend_from_slice(beneficiary.as_ref());
+    d.extend_from_slice(authority.as_ref());
     for x in [total, start, end, 0] {
         d.extend_from_slice(&x.to_le_bytes());
     }
+    debug_assert_eq!(d.len(), VAULT_LEN);
     d
 }
 
@@ -65,18 +70,25 @@ pub struct NodeConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct GenesisConfig {
+    /// "mainnet" o "devnet". Solo devnet ammette `prefund`.
+    pub network: String,
     pub timestamp_ms: u64,
     pub operator: String,
     pub lamports_per_signature: u64,
     pub blockhash_window: usize,
-    pub users_cnfa: u64,
+    /// Vault "airdrop": claim degli aventi diritto (e residuo del fee mining).
+    pub airdrop_cnfa: u64,
+    /// Vault "mining": premi del fee mining.
+    pub mining_cnfa: u64,
     pub operator_cnfa: u64,
     /// Sblocco lineare del vault operatore: blocchi dal genesis.
     pub operator_unlock_blocks: u64,
     /// Riserva bloccata fino a questa altezza (inizio = fine).
     pub reserve_unlock_height: u64,
+    /// Premio massimo per blocco all'altezza 0; dimezza ogni `halving_blocks`.
     pub block_budget_lamports: u64,
     pub halving_blocks: u64,
+    /// Fine del fee mining (24 mesi), se il vault "mining" non si esaurisce prima.
     pub fee_mining_end_height: u64,
     /// Solo devnet/test: conti pre-finanziati, sottratti alla riserva.
     #[serde(default)]
@@ -106,6 +118,14 @@ impl GenesisConfig {
             operator: parse_address(&self.operator)?,
             lamports_per_signature: self.lamports_per_signature,
             blockhash_window: self.blockhash_window,
+            block_budget: self.block_budget_lamports,
+            halving_blocks: self.halving_blocks,
+            mining_end_height: self.fee_mining_end_height,
+            vaults: Vaults {
+                mining: vault_address("mining"),
+                airdrop: vault_address("airdrop"),
+                reserve: vault_address("reserve"),
+            },
         })
     }
 }
@@ -118,6 +138,12 @@ pub struct Summary {
 /// Costruisce lo stato iniziale e verifica la conservazione: somma esatta = 100M CnFA.
 pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     let params = g.params()?;
+    match g.network.as_str() {
+        "devnet" => {}
+        "mainnet" if g.prefund.is_empty() => {}
+        "mainnet" => return Err("prefund ammesso solo con network = \"devnet\"".into()),
+        n => return Err(format!("network sconosciuta: {n} (mainnet | devnet)")),
+    }
     let mut svm = Svm::genesis(g.lamports_per_signature);
     // Account di sistema creati da litesvm: sysvar, builtin, feature, programmi.
     let system: u64 = svm.accounts().values().map(|a| a.lamports()).sum();
@@ -126,22 +152,28 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     for p in &g.prefund {
         prefund.push((parse_address(&p.pubkey)?, p.lamports));
     }
-    let users = g.users_cnfa.checked_mul(LAMPORTS_PER_CNFA).ok_or("users_cnfa")?;
-    let operator = g.operator_cnfa.checked_mul(LAMPORTS_PER_CNFA).ok_or("operator_cnfa")?;
+    let cnfa = |x: u64, n: &str| x.checked_mul(LAMPORTS_PER_CNFA).ok_or(format!("{n} troppo grande"));
+    let (airdrop, mining) = (cnfa(g.airdrop_cnfa, "airdrop_cnfa")?, cnfa(g.mining_cnfa, "mining_cnfa")?);
+    let operator = cnfa(g.operator_cnfa, "operator_cnfa")?;
     let reserve = prefund
         .iter()
         .try_fold(SUPPLY_LAMPORTS, |acc, (_, l)| acc.checked_sub(*l))
-        .and_then(|x| x.checked_sub(system)?.checked_sub(3 * rent)?.checked_sub(users)?.checked_sub(operator))
+        .and_then(|x| x.checked_sub(system)?.checked_sub(VAULTS * rent)?.checked_sub(airdrop)?.checked_sub(mining)?.checked_sub(operator))
         .ok_or("allocazioni oltre la supply")?;
 
     let tl = timelock_program_id();
     let none = Address::default();
-    for (name, benef, total, start, end) in [
-        ("users", none, users, 0, 0),
-        ("operator", params.operator, operator, 0, g.operator_unlock_blocks),
-        ("reserve", params.operator, reserve, g.reserve_unlock_height, g.reserve_unlock_height),
+    use centrifuga_timelock::{AIRDROP, MINING, OPERATOR, RESERVE};
+    let op = params.operator;
+    // (nome, tipo, beneficiario, autorità dei claim, totale, inizio, fine).
+    // Solo "operator" ha un beneficiario (withdraw); "reserve" esce solo via claim.
+    for (name, kind, benef, auth, total, start, end) in [
+        ("airdrop", AIRDROP, none, op, airdrop, 0, 0),
+        ("mining", MINING, none, none, mining, 0, 0),
+        ("operator", OPERATOR, op, none, operator, 0, g.operator_unlock_blocks),
+        ("reserve", RESERVE, none, op, reserve, g.reserve_unlock_height, g.reserve_unlock_height),
     ] {
-        let data = vault_data(&benef, total, start, end);
+        let data = vault_data(kind, &benef, &auth, total, start, end);
         svm.set(vault_address(name), Account { lamports: total + rent, data, owner: tl, executable: false, rent_epoch: u64::MAX });
     }
     for (k, l) in prefund {
@@ -152,7 +184,7 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     if total != SUPPLY_LAMPORTS as u128 {
         return Err(format!("conservazione violata: {total} != {SUPPLY_LAMPORTS}"));
     }
-    Ok((chain, Summary { system_lamports: system + 3 * rent, reserve_lamports: reserve }))
+    Ok((chain, Summary { system_lamports: system + VAULTS * rent, reserve_lamports: reserve }))
 }
 
 /// Determinismo: costruisce due volte il genesis (più un conto di test), produce
@@ -161,6 +193,8 @@ pub fn check_determinism(g: &GenesisConfig, n: u64, slot_ms: u64) -> Result<Hash
     let op = Keypair::new();
     let payer = Keypair::new_from_array([7; 32]);
     let mut g = g.clone();
+    // Copia di prova, mai pubblicata: può usare un conto prefinanziato.
+    g.network = "devnet".into();
     g.operator = op.pubkey().to_string();
     g.prefund.push(Prefund { pubkey: payer.pubkey().to_string(), lamports: LAMPORTS_PER_CNFA });
     let (mut a, _) = build(&g)?;

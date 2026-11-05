@@ -12,11 +12,13 @@ rpc_addr = "127.0.0.1:8899"    # WebSocket su 8900
 rpc_trace = false               # true: registra ogni metodo RPC chiamato
 
 [genesis]
+network = "mainnet"             # "devnet" per ammettere [[genesis.prefund]]
 timestamp_ms = 1798761600000    # 2027-01-01T00:00:00Z
 operator = "SOSTITUIRE_CON_PUBKEY_OPERATORE"
 lamports_per_signature = 5000
 blockhash_window = 300          # N: validità di un blockhash in blocchi
-users_cnfa = 50000000
+airdrop_cnfa = 20000000         # 100 CnFA a testa ai primi 200.000 aventi diritto
+mining_cnfa = 30000000          # premi del fee mining
 operator_cnfa = 20000000        # la riserva riceve il resto (30M meno account di sistema)
 operator_unlock_blocks = 1261440000   # 48 mesi a 100 ms
 reserve_unlock_height = 315360000     # ~12 mesi a 100 ms
@@ -24,7 +26,7 @@ block_budget_lamports = 10000000      # 0,01 CnFA
 halving_blocks = 157680000            # 6 mesi
 fee_mining_end_height = 630720000     # 24 mesi
 
-# Solo devnet: conti pre-finanziati, sottratti alla riserva.
+# Solo con network = "devnet": conti pre-finanziati, sottratti alla riserva.
 # [[genesis.prefund]]
 # pubkey = "..."
 # lamports = 1000000000

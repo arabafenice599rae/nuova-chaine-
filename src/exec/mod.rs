@@ -4,7 +4,7 @@
 pub mod litesvm_internal;
 pub mod state_hash;
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use solana_account::{Account, ReadableAccount};
 use solana_address::Address;
@@ -12,7 +12,8 @@ use solana_hash::Hash;
 use solana_keypair::Keypair;
 use solana_nonce::state::{Data, DurableNonce, State};
 use solana_nonce::versions::Versions;
-use solana_sdk_ids::{system_program, sysvar};
+use solana_message::VersionedMessage;
+use solana_sdk_ids::{ed25519_program, secp256k1_program, secp256r1_program, system_program, sysvar};
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
 
@@ -28,6 +29,51 @@ pub struct Params {
     pub lamports_per_signature: u64,
     /// Validità di un blockhash, in blocchi (N).
     pub blockhash_window: usize,
+    /// Fee mining: premio massimo per blocco all'altezza 0.
+    pub block_budget: u64,
+    /// Il budget dimezza ogni `halving_blocks` blocchi.
+    pub halving_blocks: u64,
+    /// Da questa altezza (o a vault "mining" vuoto) il fee mining finisce.
+    pub mining_end_height: u64,
+    pub vaults: Vaults,
+}
+
+/// Vault che il nodo muove direttamente (regole di fee nel nodo).
+#[derive(Clone, Debug)]
+pub struct Vaults {
+    pub mining: Address,
+    pub airdrop: Address,
+    pub reserve: Address,
+}
+
+/// Fee base di un messaggio: firme della tx + firme verificate dalle precompile,
+/// per `lamports_per_signature` (stessa formula dell'SVM). Esclude la priority fee.
+pub fn base_fee(m: &VersionedMessage, lamports_per_signature: u64) -> u64 {
+    let keys = m.static_account_keys();
+    let pre = [ed25519_program::id(), secp256k1_program::id(), secp256r1_program::id()];
+    let extra: u64 = m
+        .instructions()
+        .iter()
+        .filter(|ix| keys.get(ix.program_id_index as usize).is_some_and(|k| pre.contains(k)))
+        .map(|ix| u64::from(ix.data.first().copied().unwrap_or(0)))
+        .sum();
+    (u64::from(m.header().num_required_signatures) + extra).saturating_mul(lamports_per_signature)
+}
+
+/// Come sono state ripartite le fee di un blocco.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Settlement {
+    pub mining_active: bool,
+    /// Somma delle fee base pagate nel blocco.
+    pub base: u64,
+    /// Priority fee restituite ai pagatori.
+    pub priority_refund: u64,
+    pub operator: u64,
+    pub reserve: u64,
+    /// Premio pagato dal vault "mining" ai pagatori.
+    pub reward: u64,
+    /// Residuo del vault "mining" passato ad "airdrop" a fine periodo.
+    pub to_airdrop: u64,
 }
 
 pub struct Chain {
@@ -52,6 +98,7 @@ pub struct Executed {
     pub results: Vec<TransactionResult>,
     /// Saldi (prima, dopo) degli account statici di ogni tx, per getTransaction.
     pub balances: Vec<(Vec<u64>, Vec<u64>)>,
+    pub settlement: Settlement,
 }
 
 /// Una tx durable-nonce: (account nonce, autorità).
@@ -180,13 +227,80 @@ impl Chain {
         changed.insert(to);
     }
 
+    fn debit(&mut self, from: Address, lamports: u64, changed: &mut BTreeSet<Address>) {
+        if lamports == 0 {
+            return;
+        }
+        let mut acc: Account = self.svm.get(&from).cloned().expect("debit da account inesistente").into();
+        acc.lamports = acc.lamports.checked_sub(lamports).expect("debit oltre il saldo");
+        self.svm.set(from, acc);
+        changed.insert(from);
+    }
+
+    /// Lamport spendibili di un vault (oltre il minimo per la rent exemption).
+    pub fn vault_available(&self, k: &Address) -> u64 {
+        self.svm.get(k).map_or(0, |a| a.lamports().saturating_sub(self.svm.rent_exempt(a.data().len())))
+    }
+
+    /// Budget del premio per blocco: dimezza ogni `halving_blocks`.
+    pub fn block_budget(&self, height: u64) -> u64 {
+        let halvings = height / self.params.halving_blocks.max(1);
+        self.params.block_budget.checked_shr(halvings.min(64) as u32).unwrap_or(0)
+    }
+
+    /// Fee mining attivo: prima della fine e con il vault "mining" non vuoto.
+    pub fn mining_active(&self, height: u64) -> bool {
+        height < self.params.mining_end_height && self.vault_available(&self.params.vaults.mining) > 0
+    }
+
+    /// Fine blocco. `paid`: (pagatore, fee base, priority fee) per ogni tx inclusa.
+    /// - priority fee: rimborsata al pagatore;
+    /// - fee mining attivo: 10% della base all'operatore, 90% al vault "reserve";
+    ///   premio = min(budget, 90% della base, saldo "mining") ai pagatori in
+    ///   proporzione alla base pagata (il resto della divisione resta nel vault);
+    /// - dopo: 100% della base all'operatore, residuo di "mining" ad "airdrop".
+    fn settle(&mut self, height: u64, paid: &[(Address, u64, u64)], changed: &mut BTreeSet<Address>) -> Settlement {
+        let v = self.params.vaults.clone();
+        let mut s = Settlement { mining_active: self.mining_active(height), ..Settlement::default() };
+        let mut by_payer: BTreeMap<Address, u64> = BTreeMap::new();
+        for (payer, base, prio) in paid {
+            s.base += base;
+            s.priority_refund += prio;
+            *by_payer.entry(*payer).or_default() += base;
+            self.credit(*payer, *prio, changed);
+        }
+        if !s.mining_active {
+            s.operator = s.base;
+            self.credit(self.params.operator, s.base, changed);
+            s.to_airdrop = self.vault_available(&v.mining);
+            self.debit(v.mining, s.to_airdrop, changed);
+            self.credit(v.airdrop, s.to_airdrop, changed);
+            return s;
+        }
+        s.operator = s.base / 10;
+        s.reserve = s.base - s.operator;
+        self.credit(self.params.operator, s.operator, changed);
+        self.credit(v.reserve, s.reserve, changed);
+        let ninety = (s.base as u128 * 9 / 10) as u64;
+        let reward = self.block_budget(height).min(ninety).min(self.vault_available(&v.mining));
+        if reward > 0 {
+            for (payer, base) in by_payer {
+                let share = (reward as u128 * base as u128 / s.base as u128) as u64;
+                self.credit(payer, share, changed);
+                s.reward += share;
+            }
+            self.debit(v.mining, s.reward, changed);
+        }
+        s
+    }
+
     /// Esegue un blocco. `strict` = riesecuzione: ogni tx deve essere includibile.
     fn run(&mut self, ts: u64, txs: Vec<VersionedTransaction>, strict: bool) -> Result<Executed, String> {
         let height = self.height + 1;
         self.svm.begin_block(height, (ts / 1000) as i64, self.last_hash);
         let mut changed = BTreeSet::from([sysvar::clock::id()]);
         let (mut included, mut results, mut sigs, mut balances) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut fees = 0u64;
+        let mut paid = Vec::new();
         for tx in txs {
             let nonce = match self.check(&tx) {
                 Ok(n) => n,
@@ -207,15 +321,15 @@ impl Chain {
                 self.advance_nonce(k, auth);
             }
             balances.push((pre, keys.iter().map(|k| self.svm.lamports(k)).collect()));
-            fees += ex.fee_charged;
+            let base = base_fee(&tx.message, self.params.lamports_per_signature).min(ex.fee_charged);
+            paid.push((keys[0], base, ex.fee_charged - base));
             changed.extend(writable);
             self.seen.insert(tx.signatures[0]);
             sigs.push(tx.signatures[0]);
             included.push(tx);
             results.push(ex.result);
         }
-        // Passo 1: tutte le fee all'operatore (supply conservata). Fee mining al passo 2.
-        self.credit(self.params.operator, fees, &mut changed);
+        let settlement = self.settle(height, &paid, &mut changed);
         let state_hash = self.state_hash(&changed);
         let block = Block {
             header: Header { height, prev_hash: self.last_hash, timestamp_ms: ts, state_hash, signature: Signature::default() },
@@ -227,7 +341,7 @@ impl Chain {
         }
         self.height = height;
         self.last_ts = ts;
-        Ok(Executed { block, changed, results, balances })
+        Ok(Executed { block, changed, results, balances, settlement })
     }
 
     fn finish(&mut self, ex: &Executed) {
