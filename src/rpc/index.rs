@@ -18,6 +18,8 @@ pub struct TxRecord {
     pub result: TransactionResult,
     pub pre: Vec<u64>,
     pub post: Vec<u64>,
+    /// Tempo nel nodo: arrivo della richiesta HTTP -> blocco firmato e scritto (µs).
+    pub node_us: Option<u64>,
 }
 
 impl TxRecord {
@@ -51,6 +53,7 @@ impl TxIndex {
                 result: result.clone(),
                 pre: pre.clone(),
                 post: post.clone(),
+                node_us: None,
             };
             self.by_sig.insert(sig, rec);
         }

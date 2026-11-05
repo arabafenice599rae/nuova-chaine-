@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use std::sync::mpsc::Sender;
 
 use http_body_util::{BodyExt, Full, Limited};
@@ -77,14 +78,14 @@ impl Gateway {
         }
     }
 
-    pub async fn call(&self, req: Value, peer: Option<IpAddr>) -> Value {
+    pub async fn call(&self, req: Value, peer: Option<IpAddr>, arrived: Instant) -> Value {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let Some(method) = req["method"].as_str().map(str::to_owned) else {
             return json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "Invalid request"}});
         };
         let params = req.get("params").cloned().unwrap_or(json!([]));
         let m = method.clone();
-        let resp = match self.query(move |n| methods::call(n, &m, &params, peer)).await {
+        let resp = match self.query(move |n| methods::call(n, &m, &params, peer, arrived)).await {
             Some(Ok(v)) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Some(Err(e)) => {
                 // `data: null` manda in errore web3.js: si omette se vuoto.
@@ -113,6 +114,7 @@ fn reply(status: StatusCode, body: Vec<u8>) -> Response<Full<Bytes>> {
 }
 
 async fn handle(gw: Gateway, peer: IpAddr, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+    let arrived = Instant::now();
     if req.method() == Method::OPTIONS {
         return Ok(reply(StatusCode::NO_CONTENT, vec![]));
     }
@@ -131,11 +133,11 @@ async fn handle(gw: Gateway, peer: IpAddr, req: Request<Incoming>) -> Result<Res
         Ok(Value::Array(reqs)) => {
             let mut v = Vec::with_capacity(reqs.len());
             for r in reqs {
-                v.push(gw.call(r, Some(peer)).await);
+                v.push(gw.call(r, Some(peer), arrived).await);
             }
             json!(v)
         }
-        Ok(r) => gw.call(r, Some(peer)).await,
+        Ok(r) => gw.call(r, Some(peer), arrived).await,
         Err(_) => json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"}}),
     };
     Ok(reply(StatusCode::OK, serde_json::to_vec(&out).unwrap()))

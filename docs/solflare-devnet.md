@@ -1,103 +1,129 @@
 # Test con Solflare su un nodo devnet
 
-Obiettivo: verificare che Solflare funzioni con un nodo centrifuga e scoprire, dal
-log, quali metodi RPC chiede davvero. **Non si aggiungono metodi in anticipo**: solo
-quelli che il log mostra come `NON_SUPPORTATO` e che servono a una funzione del wallet.
+Obiettivo: verificare che Solflare funzioni con un nodo centrifuga, misurare la
+latenza dalla tua rete e scoprire, dal log, quali metodi RPC chiede davvero il
+wallet. **Non si aggiungono metodi in anticipo**: solo quelli che il log mostra come
+`NON_SUPPORTATO` e che servono a una voce della checklist che non funziona.
 
-## 1. Chiavi e configurazione
+## Requisiti minimi del VPS
 
-Servono: un server con IP pubblico, un dominio (es. `rpc.example.org`) che punta al
-server, Rust (la versione la fissa `rust-toolchain.toml`) e Node.js 22 per gli script.
+| | minimo | note |
+|---|---|---|
+| Sistema | Debian 12, Ubuntu 22.04 o 24.04, x86_64 | servono systemd e apt |
+| CPU | 2 vCPU | la compilazione dura 10–20 minuti |
+| RAM | 2 GB | sotto 3,5 GB lo script crea 4 GB di swap per la compilazione; il nodo poi usa poche centinaia di MB |
+| Disco | 20 GB SSD | sorgenti e compilazione ~6 GB; il journal cresce di ~130 MB al giorno (blocchi vuoti ogni 100 ms) |
+| Rete | IPv4 pubblico, porte 80 e 443 aperte in ingresso | la 80 serve a Let's Encrypt |
+| DNS | record A del dominio (es. `rpc.example.org`) verso l'IP del VPS, già propagato | |
 
-```sh
-git clone <repo> centrifuga && cd centrifuga
-cargo build --release --bins --examples
-./target/release/examples/keygen > operator.json   # stampa la pubkey dell'operatore
-./target/release/examples/keygen > faucet.json     # conto per creare il token di prova
-cp centrifuga.example.toml centrifuga.toml
-```
+Sul tuo computer: Node.js 22 e una copia del repository, per la misura di latenza e
+per lo script del token di prova.
 
-In `centrifuga.toml`:
-
-```toml
-[node]
-rpc_addr = "127.0.0.1:8899"    # resta locale: davanti c'è il proxy HTTPS (WebSocket su 8900)
-rpc_log = true                 # registra ogni metodo ricevuto in data/rpc.log
-
-[genesis]
-network = "devnet"             # obbligatorio per usare prefund
-operator = "<pubkey di operator.json>"
-
-[[genesis.prefund]]            # il wallet Solflare da testare (indirizzo copiato dall'app)
-pubkey = "<indirizzo Solflare>"
-lamports = 100000000000        # 100 CnFA
-
-[[genesis.prefund]]            # conto per lo script del token SPL
-pubkey = "<pubkey di faucet.json>"
-lamports = 10000000000         # 10 CnFA
-```
-
-I conti prefinanziati entrano solo nel genesis: per cambiarli, fermare il nodo e
-cancellare `data/` (su devnet si riparte da zero).
+## 1. Sul tuo computer: chiave per la misura di latenza
 
 ```sh
-./target/release/centrifuga genesis centrifuga.toml   # controlli di conservazione e determinismo
-./target/release/centrifuga run centrifuga.toml
+git clone https://github.com/arabafenice599rae/nuova-chaine-.git centrifuga
+cd centrifuga/tests/web3 && npm ci
+node latency.mjs https://rpc.example.org bench.json
 ```
 
-## 2. Endpoint HTTPS pubblico
+Il comando crea `bench.json` (resta sul tuo computer, permessi 600) e stampa la
+pubkey da prefinanziare. Annota anche l'indirizzo del wallet Solflare da testare
+(dall'app: ricevi → copia indirizzo).
 
-I wallet richiedono HTTPS. Con l'URL `https://rpc.example.org` (senza porta) i client
-basati su web3.js aprono il WebSocket su `wss://rpc.example.org`, stessa porta: il
-proxy deve mandare le richieste di upgrade a 8900 e il resto a 8899. Esempio con
-[Caddy](https://caddyserver.com) (certificato Let's Encrypt automatico, e passa
-l'IP reale in `X-Forwarded-For`, che il nodo usa per i limiti per IP):
-
-```
-rpc.example.org {
-    @ws header Connection *Upgrade*
-    reverse_proxy @ws 127.0.0.1:8900
-    reverse_proxy 127.0.0.1:8899
-}
-```
-
-Controllo dall'esterno:
+## 2. Sul VPS: installazione con un solo comando
 
 ```sh
-curl -s https://rpc.example.org -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getVersion"}'
-./target/release/centrifuga balance <indirizzo Solflare> http://127.0.0.1:8899   # sul server: "100 CnFA"
+ssh root@<ip-del-vps>
+git clone https://github.com/arabafenice599rae/nuova-chaine-.git /opt/centrifuga
+cd /opt/centrifuga
+deploy/devnet-install.sh --domain rpc.example.org --email tu@example.org \
+  --prefund <indirizzo Solflare>:100 --prefund <pubkey di bench.json>:10
 ```
 
-## 3. Token SPL di prova
+(Con un utente non root: `sudo deploy/devnet-install.sh ...`.)
+
+Lo script, in ordine:
+1. installa i pacchetti di sistema e Caddy (repository ufficiale), crea l'utente
+   `centrifuga` e, se la RAM è poca, lo swap;
+2. installa Rust alla versione di `rust-toolchain.toml` e compila il nodo;
+3. genera **sul server** la chiave dell'operatore e quella del faucet in
+   `/var/lib/centrifuga/` (permessi 600, proprietario `centrifuga`). Le chiavi non
+   vengono mai stampate: lo script mostra solo le pubkey;
+4. scrive `/etc/centrifuga/centrifuga.toml`, con `network = "devnet"`, i conti
+   prefinanziati (più 10 CnFA al faucet), `rpc_log = true` e RPC e stream in
+   ascolto solo su `127.0.0.1`;
+5. verifica il genesis (conservazione e determinismo);
+6. installa e avvia il servizio systemd `centrifuga`;
+7. configura Caddy: HTTPS con Let's Encrypt; WebSocket sulla stessa porta (upgrade
+   instradati al nodo); stream su `/stream`; l'IP reale passa in `X-Forwarded-For`;
+8. controlla che `https://rpc.example.org/health` risponda.
+
+Rieseguire lo script (es. dopo `git pull`) ricompila e riavvia, senza toccare
+chiavi, config e dati. Per cambiare i conti prefinanziati serve rifare il genesis:
+`--reset` cancella config e dati della chain (non le chiavi).
+
+Comandi utili sul VPS:
 
 ```sh
-cd tests/web3 && npm ci
-node devnet-token.mjs http://127.0.0.1:8899 ../../faucet.json <indirizzo Solflare>
+systemctl status centrifuga caddy
+journalctl -u centrifuga -f                      # blocchi con transazioni, errori
+centrifuga balance <indirizzo Solflare>          # "100 CnFA"
 ```
 
-## 4. Checklist
+## 3. Latenza dalla tua rete
+
+```sh
+cd centrifuga/tests/web3
+node latency.mjs https://rpc.example.org bench.json      # 200 tx, ~1 minuto
+```
+
+Output: media, p50, p95 e p99 di quattro misure:
+- **RTT HTTP**: `getHealth`, solo rete (TLS, Caddy, nodo che risponde subito);
+- **totale**: da `sendTransaction` (con preflight) alla notifica `signatureSubscribe`
+  del blocco firmato e scritto;
+- **nodo**: dall'arrivo della richiesta al nodo al blocco firmato e scritto
+  (misurato dal nodo, campo `centrifugaNodeLatencyUs` di `getTransaction`);
+- **rete**: totale − nodo (andata della richiesta + ritorno della notifica).
+
+Il tempo nel nodo è in media metà slot (~50 ms con slot da 100 ms). La parte di rete
+è quella su cui QUIC potrebbe incidere: confrontarla con l'RTT.
+
+## 4. Token SPL di prova
+
+Sul VPS, con la chiave del faucet generata dallo script:
+
+```sh
+cd /opt/centrifuga/tests/web3 && npm ci
+sudo -u centrifuga node devnet-token.mjs http://127.0.0.1:8899 /var/lib/centrifuga/faucet.json <indirizzo Solflare>
+```
+
+(Node.js sul VPS: `apt-get install -y nodejs npm`, oppure lanciare lo script dal tuo
+computer con una chiave prefinanziata anche lì.)
+
+## 5. Checklist Solflare
 
 Annotare per ogni voce: esito, cosa mostra Solflare, eventuali errori.
 
-- [ ] **Aggiunta del nodo**: nelle impostazioni di rete di Solflare, RPC personalizzato
-      `https://rpc.example.org`. Solflare lo accetta? Mostra errori di rete?
+- [ ] **Aggiunta del nodo**: nelle impostazioni di rete di Solflare, RPC
+      personalizzato `https://rpc.example.org`. Solflare lo accetta? Errori di rete?
 - [ ] **Saldo**: il wallet prefinanziato mostra 100. Con quale nome e simbolo?
-- [ ] **Ricezione**: da un secondo wallet (o con lo script del faucet) inviare CnFA
-      al wallet. Il saldo si aggiorna da solo (WebSocket) o serve ricaricare?
+- [ ] **Ricezione**: inviare CnFA al wallet da un altro wallet. Il saldo si
+      aggiorna da solo (WebSocket) o serve ricaricare?
 - [ ] **Invio**: inviare 1 CnFA a un indirizzo nuovo. Fee mostrata prima della
       conferma? Conferma rapida? La tx compare nello storico?
-- [ ] **Token SPL**: il token di prova compare con saldo 1.000? Invio di 10 token a un
-      altro indirizzo: riesce? (Un token senza metadati sarà mostrato come sconosciuto.)
-- [ ] **Nome mostrato per il token nativo**: ci aspettiamo "SOL" (i wallet non leggono
-      il campo `token` di `getVersion`). Annotare esattamente cosa compare.
+- [ ] **Token SPL**: il token di prova compare con saldo 1.000? Invio di 10 token a
+      un altro indirizzo: riesce? (Senza metadati sarà mostrato come sconosciuto.)
+- [ ] **Nome mostrato per il token nativo**: ci aspettiamo "SOL" (i wallet non
+      leggono il campo `token` di `getVersion`). Annotare esattamente cosa compare.
 
-## 5. Raccolta del log
+## 6. Raccolta dei risultati
+
+Sul VPS:
 
 ```sh
-cut -d' ' -f2- data/rpc.log | sort | uniq -c | sort -rn   # metodi ricevuti, con esito
-grep NON_SUPPORTATO data/rpc.log | cut -d' ' -f2,3 | sort -u
+cut -d' ' -f2- /var/lib/centrifuga/data/rpc.log | sort | uniq -c | sort -rn   # metodi ricevuti, con esito
+grep NON_SUPPORTATO /var/lib/centrifuga/data/rpc.log | cut -d' ' -f2,3 | sort -u
 ```
 
-Riportare i due output insieme alla checklist. Si aggiungono solo i metodi
-`NON_SUPPORTATO` legati a una voce della checklist che non funziona.
+Riportare i due output, la checklist compilata e l'output di `latency.mjs`.
