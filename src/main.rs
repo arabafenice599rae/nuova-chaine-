@@ -5,7 +5,7 @@ use centrifuga::genesis::{self, Config};
 use centrifuga::node::{Node, fmt_amount, read_keypair};
 use centrifuga::rpc::{self, BlockEvent, Gateway};
 
-const USAGE: &str = "uso: centrifuga <genesis|run> [config.toml]";
+const USAGE: &str = "uso: centrifuga genesis|run [config.toml]\n     centrifuga eligible <config.toml> <lista_airdrop.txt> <output.txt>";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -13,6 +13,7 @@ fn main() {
     let res = match args.get(1).map(String::as_str) {
         Some("genesis") => cmd_genesis(&cfg_path),
         Some("run") => cmd_run(&cfg_path),
+        Some("eligible") if args.len() == 5 => cmd_eligible(&cfg_path, &args[3], &args[4]),
         _ => Err(USAGE.to_string()),
     };
     if let Err(e) = res {
@@ -36,6 +37,23 @@ fn cmd_genesis(path: &PathBuf) -> Result<(), String> {
     let h = genesis::check_determinism(&cfg.genesis, 20, cfg.node.slot_ms)?;
     println!("determinismo: OK (20 blocchi di test, hash finale {h})");
     println!("genesis hash: {}", chain.genesis_hash);
+    Ok(())
+}
+
+/// Aventi diritto al residuo del fee mining, rieseguendo il journal da zero.
+fn cmd_eligible(path: &PathBuf, list: &str, out: &str) -> Result<(), String> {
+    use centrifuga::claims;
+    let cfg = Config::load(path)?;
+    let text = std::fs::read_to_string(list).map_err(|e| format!("{list}: {e}"))?;
+    let airdrop = claims::parse_list(&text)?;
+    let e = claims::compute(&cfg.genesis, &cfg.node.data_dir.join("journal.bin"), &airdrop)?;
+    let (file, hash) = e.render();
+    std::fs::write(out, &file).map_err(|e| format!("{out}: {e}"))?;
+    let sym = &cfg.node.token_symbol;
+    println!("fine fee mining al blocco {}, residuo {}", e.end_height, fmt_amount(e.residual, sym));
+    println!("aventi diritto: {} su {} in lista, quota {}", e.eligible.len(), airdrop.len(), fmt_amount(e.quota, sym));
+    println!("non assegnato (a reserve): {}", fmt_amount(e.unassigned, sym));
+    println!("{out} sha256 {hash}");
     Ok(())
 }
 

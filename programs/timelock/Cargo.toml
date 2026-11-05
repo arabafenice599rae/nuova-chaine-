@@ -1,0 +1,18 @@
+[package]
+name = "centrifuga-timelock"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Vault con sblocco lineare e claim firmati dall'operatore (centrifuga)."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+# 0.9: nessuna dipendenza transitiva (dalla 0.10 in poi arrivano i crate solana-*).
+pinocchio = "=0.9.2"
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

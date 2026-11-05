@@ -32,16 +32,17 @@ pub fn vault_address(name: &str) -> Address {
 pub const VAULTS: u64 = 4;
 pub const VAULT_NAMES: [&str; 4] = ["airdrop", "mining", "operator", "reserve"];
 
-/// Layout del vault (condiviso con programs/timelock):
-/// beneficiario(32) totale(8) inizio(8) fine(8) prelevato(8).
-pub const VAULT_LEN: usize = 64;
+/// Layout del vault: definito dal programma timelock (`centrifuga_timelock`).
+pub use centrifuga_timelock::VAULT_LEN;
 
-pub fn vault_data(beneficiary: &Address, total: u64, start: u64, end: u64) -> Vec<u8> {
-    let mut d = Vec::with_capacity(VAULT_LEN);
+pub fn vault_data(kind: u8, beneficiary: &Address, authority: &Address, total: u64, start: u64, end: u64) -> Vec<u8> {
+    let mut d = vec![centrifuga_timelock::VAULT_TAG, kind];
     d.extend_from_slice(beneficiary.as_ref());
+    d.extend_from_slice(authority.as_ref());
     for x in [total, start, end, 0] {
         d.extend_from_slice(&x.to_le_bytes());
     }
+    debug_assert_eq!(d.len(), VAULT_LEN);
     d
 }
 
@@ -162,13 +163,17 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
 
     let tl = timelock_program_id();
     let none = Address::default();
-    for (name, benef, total, start, end) in [
-        ("airdrop", none, airdrop, 0, 0),
-        ("mining", none, mining, 0, 0),
-        ("operator", params.operator, operator, 0, g.operator_unlock_blocks),
-        ("reserve", params.operator, reserve, g.reserve_unlock_height, g.reserve_unlock_height),
+    use centrifuga_timelock::{AIRDROP, MINING, OPERATOR, RESERVE};
+    let op = params.operator;
+    // (nome, tipo, beneficiario, autorità dei claim, totale, inizio, fine).
+    // Solo "operator" ha un beneficiario (withdraw); "reserve" esce solo via claim.
+    for (name, kind, benef, auth, total, start, end) in [
+        ("airdrop", AIRDROP, none, op, airdrop, 0, 0),
+        ("mining", MINING, none, none, mining, 0, 0),
+        ("operator", OPERATOR, op, none, operator, 0, g.operator_unlock_blocks),
+        ("reserve", RESERVE, none, op, reserve, g.reserve_unlock_height, g.reserve_unlock_height),
     ] {
-        let data = vault_data(&benef, total, start, end);
+        let data = vault_data(kind, &benef, &auth, total, start, end);
         svm.set(vault_address(name), Account { lamports: total + rent, data, owner: tl, executable: false, rent_epoch: u64::MAX });
     }
     for (k, l) in prefund {

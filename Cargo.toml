@@ -1,3 +1,7 @@
+[workspace]
+# Il programma on-chain è un crate a sé: toolchain SBF e lockfile propri.
+exclude = ["programs/timelock"]
+
 [package]
 name = "centrifuga"
 version = "0.1.0"
@@ -27,6 +31,8 @@ ed25519-dalek = { version = "2.2", features = ["batch"] }
 # Fuori dal grafo di litesvm: TOML del genesis e rete (RPC/WebSocket).
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+# Costanti e messaggio di claim condivisi con il programma on-chain (pinocchio, zero dipendenze).
+centrifuga-timelock = { path = "programs/timelock" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

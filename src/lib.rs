@@ -1,5 +1,6 @@
 //! centrifuga: chain SVM a validatore unico.
 
+pub mod claims;
 pub mod exec;
 pub mod genesis;
 pub mod ingress;
