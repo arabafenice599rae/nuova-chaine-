@@ -165,7 +165,7 @@ fn node_limit(n: u64, storage: &str, blocks: usize) {
     use centrifuga::genesis::{Config, IndexerConfig, LAMPORTS_PER_CNFA, Prefund};
     use centrifuga::node::Node;
     use std::sync::atomic::{AtomicBool, Ordering};
-    const STEPS: [usize; 7] = [1000, 1500, 2000, 2200, 2400, 2600, 3000];
+    const STEPS: [usize; 9] = [100, 250, 500, 1000, 1500, 2000, 2200, 2400, 3000];
     let op = Keypair::new();
     let senders: Vec<Keypair> = (0..2_000).map(|_| Keypair::new()).collect();
     let mut cfg: Config = toml::from_str(include_str!("../centrifuga.example.toml")).unwrap();
