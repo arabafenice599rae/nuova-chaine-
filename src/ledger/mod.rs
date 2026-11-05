@@ -15,12 +15,14 @@ pub use block::{Block, Header};
 /// Journal: sequenza di record `[len u32][blocco]`. Mai riscritto, solo esteso.
 pub struct Journal {
     file: File,
+    /// Offset di fine file: dove inizierà il prossimo record.
+    end: u64,
 }
 
 impl Journal {
-    /// Apre (o crea) il journal e passa ogni blocco a `f`, in ordine.
-    /// Un record finale incompleto (crash a metà scrittura) viene troncato.
-    pub fn open(path: &Path, mut f: impl FnMut(Block) -> Result<(), String>) -> Result<Journal, String> {
+    /// Apre (o crea) il journal e passa ogni blocco a `f`, in ordine, con l'offset
+    /// del suo record. Un record finale incompleto (crash a metà scrittura) viene troncato.
+    pub fn open(path: &Path, mut f: impl FnMut(Block, u64) -> Result<(), String>) -> Result<Journal, String> {
         let mut file = OpenOptions::new().read(true).append(true).create(true).open(path).map_err(|e| e.to_string())?;
         let total = file.metadata().map_err(|e| e.to_string())?.len();
         let mut r = BufReader::new(&mut file);
@@ -36,7 +38,7 @@ impl Journal {
             }
             let mut buf = vec![0u8; len as usize];
             r.read_exact(&mut buf).map_err(|e| e.to_string())?;
-            f(Block::decode(&buf)?)?;
+            f(Block::decode(&buf)?, good)?;
             good += 4 + len;
         }
         drop(r);
@@ -44,17 +46,32 @@ impl Journal {
             eprintln!("journal: tronco {} byte finali incompleti", total - good);
             file.set_len(good).map_err(|e| e.to_string())?;
         }
-        Ok(Journal { file })
+        Ok(Journal { file, end: good })
     }
 
-    pub fn append(&mut self, b: &Block) -> io::Result<()> {
+    /// Accoda un blocco e ne restituisce l'offset.
+    pub fn append(&mut self, b: &Block) -> io::Result<u64> {
         let bytes = b.encode();
         let mut rec = Vec::with_capacity(4 + bytes.len());
         rec.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         rec.extend_from_slice(&bytes);
         self.file.write_all(&rec)?;
-        self.file.sync_data()
+        self.file.sync_data()?;
+        let at = self.end;
+        self.end += rec.len() as u64;
+        Ok(at)
     }
+}
+
+/// Legge il blocco che inizia all'offset dato (da un altro handle, in sola lettura).
+pub fn read_block_at(file: &mut File, offset: u64) -> Result<Block, String> {
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let mut len = [0u8; 4];
+    file.read_exact(&mut len).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; u32::from_le_bytes(len) as usize];
+    file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+    Block::decode(&buf)
 }
 
 const SNAP_MAGIC: &[u8; 8] = b"CNFASNP1";

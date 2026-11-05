@@ -130,7 +130,7 @@ fn transaction(r: &TxRecord, c: &Value) -> Value {
     })
 }
 
-pub fn call(n: &mut Node, method: &str, p: &Value) -> R {
+pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr>) -> R {
     let height = n.chain.height;
     Ok(match method {
         "getHealth" => json!("ok"),
@@ -226,10 +226,14 @@ pub fn call(n: &mut Node, method: &str, p: &Value) -> R {
                 }
             }
             let s = tx.signatures[0];
-            if n.ingress.submit(vec![tx])[0].is_none() {
-                return Err(RpcError { code: -32003, message: "Transaction signature verification failure".into(), data: Value::Null });
-            }
-            json!(s.to_string())
+            use crate::ingress::Rejected;
+            let message = match n.ingress.submit(peer, vec![tx]).remove(0) {
+                Ok(_) => return Ok(json!(s.to_string())),
+                Err(Rejected::BadSignature) => "Transaction signature verification failure",
+                Err(Rejected::RateLimited) => "limite di invio per IP superato, riprova",
+                Err(Rejected::TooManyPending) => "troppe tx in coda per questo pagatore, riprova",
+            };
+            return Err(RpcError { code: -32003, message: message.into(), data: Value::Null });
         }
         "getSignatureStatuses" => {
             let sigs: Vec<String> = arg(p, 0)?;
@@ -266,7 +270,6 @@ pub fn call(n: &mut Node, method: &str, p: &Value) -> R {
             json!(out)
         }
         _ => {
-            eprintln!("rpc: metodo NON supportato: {method}");
             return Err(RpcError { code: -32601, message: "Method not found".into(), data: Value::Null });
         }
     })

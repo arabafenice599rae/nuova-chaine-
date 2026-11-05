@@ -189,21 +189,91 @@ Differenze da Solana, per scelta:
   `preTokenBalances`/`postTokenBalances` e `innerInstructions` vuoti;
 - getTransaction/getSignaturesForAddress coprono le tx dall'ultimo snapshot in poi
   (indice in memoria ricostruito dal journal al riavvio);
-- ogni metodo non supportato risponde `-32601` e finisce nel log
-  (`rpc: metodo NON supportato: ...`). Con `rpc_trace = true` il nodo registra
-  ogni chiamata: è così che si scopre cosa chiede un wallet.
+- ogni metodo non supportato risponde `-32601`. Con `rpc_log = true` il nodo scrive
+  in `data_dir/rpc.log` una riga per richiesta (`unix_ms canale metodo esito`, con
+  `NON_SUPPORTATO` per i metodi mancanti): è così che si scopre cosa chiede un wallet.
 
-Test con un client reale (`@solana/web3.js` + `@solana/spl-token`):
+Test con un client reale (`@solana/web3.js` + `@solana/spl-token`), che avvia da solo
+un nodo devnet con un conto prefinanziato:
 
 ```
-cd tests/web3 && npm install
-node rpc.mjs http://127.0.0.1:8899 ../../user.json   # keypair prefinanziato
+cd tests/web3 && npm ci && cd ../..
+scripts/web3-node.sh rpc.mjs
 ```
 
-Test con Solflare: impostare `rpc_trace = true`, avviare il nodo raggiungibile dal
-telefono/browser, in Solflare aggiungere il nodo custom, poi controllare il log:
-`grep -E '^(rpc|ws)' log | sort | uniq -c` elenca i metodi chiamati, e le righe
-`NON supportato` quelli mancanti.
+Test con Solflare: vedi [docs/solflare-devnet.md](docs/solflare-devnet.md) (nodo devnet,
+endpoint HTTPS pubblico, prefund, checklist).
+
+## Stream
+
+L'API principale per bot e repliche (`src/stream/`): WebSocket su `stream_addr`
+(default `127.0.0.1:8901`), un messaggio JSON per frame.
+
+- A ogni blocco: `{"type":"block", "header":{height, prev_hash, timestamp_ms,
+  state_hash, signature}, "txs":[base64], "accounts":[...]}` con il valore, dopo il
+  blocco, di ogni account cambiato (`lamports: 0` = cancellato).
+- `ws://host:8901/?from_height=h`: il client riceve dal **journal** i blocchi da h
+  in poi (solo header e corpo) e poi `{"type":"sync","full":false,"accounts":[...]}`
+  con il valore attuale di ogni account cambiato da h, se h è negli ultimi
+  `stream_catchup_blocks` blocchi; altrimenti (o senza `from_height`) lo stato
+  completo (`"full":true`) ancorato all'ultimo blocco.
+- Il client verifica la firma dell'operatore, la continuità `prev_hash` e l'hash di
+  stato (a ogni blocco live e dopo ogni sync). `stream::Replica` fa tutto questo: il
+  test `replica_rebuilds_state_from_stream_only` ricostruisce lo stato solo dallo
+  stream, con due riconnessioni, e ottiene lo stesso hash degli header del nodo.
+- Il nodo non aspetta mai i client: un canale broadcast con capacità
+  `stream_max_lag_blocks`. Chi resta indietro di più (o ha un invio bloccato per più
+  di `stream_max_lag_blocks × slot_ms`) viene disconnesso e si riconnette con
+  `from_height`. Il messaggio di un blocco si costruisce solo se c'è almeno un client.
+
+## Ingresso delle transazioni
+
+Per ora HTTP (`sendTransaction`); QUIC si valuterà con i numeri qui sotto.
+`ingress::Ingress::submit(mittente, txs)` è l'interfaccia comune: verifica le firme in
+batch, applica i limiti e assegna il seq. Un futuro server QUIC chiamerà la stessa.
+
+- Limite per IP: `ingress_tps_per_ip` tx/s (burst di 2 s). Dietro un proxy locale
+  vale l'IP in `X-Forwarded-For`.
+- Limite per pagatore: al massimo `ingress_pending_per_payer` tx in coda non ancora
+  eseguite (un pagatore non può riempire la coda FIFO).
+- Rifiuti: errore `-32003` con il motivo.
+
+Latenza da invio a blocco firmato (`tests/web3/latency.mjs`: `sendTransaction` con
+preflight → notifica `signatureSubscribe`, emessa dopo firma e scrittura del journal).
+Nodo e client sulla stessa macchina (container Linux), loopback, ms:
+
+| slot | caso | media | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| 100 ms | arrivo casuale (200 tx) | 54,5 | 53,5 | 96,0 | 103,4 | 106,4 |
+| 100 ms | invio a inizio slot (200 tx) | 94,6 | 94,9 | 96,0 | 99,2 | 100,2 |
+| 100 ms | raffica di 60 in parallelo | 159,9 | 160,2 | 225,2 | 240,6 | 240,6 |
+| 50 ms | arrivo casuale (200 tx) | 31,1 | 34,2 | 48,9 | 56,1 | 56,9 |
+| 50 ms | invio a inizio slot (200 tx) | 45,1 | 44,8 | 47,0 | 51,6 | 60,2 |
+| 50 ms | raffica di 60 in parallelo | 114,0 | 109,8 | 186,5 | 203,9 | 203,9 |
+
+- Produzione di un blocco vuoto (esecuzione, hash di stato, firma, fsync del journal):
+  circa 1,05 ms (9.514 blocchi in 10 s con `slot_ms = 1`).
+- La latenza è dominata dall'attesa dello slot (in media metà slot). Nella raffica
+  pesa il preflight (`simulateTransaction`), eseguito una tx alla volta sul thread
+  del nodo. Il trasporto HTTP su loopback è trascurabile: QUIC può guadagnare solo
+  su reti reali, dove questi numeri vanno rimisurati.
+
+Riprodurre: `scripts/web3-node.sh latency.mjs 100` (slot in ms come secondo argomento).
+
+## CLI
+
+```
+centrifuga genesis [config]                 # costruisce e verifica il genesis
+centrifuga run [config]                     # nodo: blocchi, RPC, WebSocket, stream
+centrifuga balance <pubkey> [url_rpc]       # es. "12.5 CnFA" (simbolo da getVersion)
+centrifuga eligible <config> <lista> <out>  # aventi diritto al residuo del fee mining
+```
+
+## CI
+
+`.github/workflows/ci.yml`: build, `cargo test`, test web3.js contro un nodo devnet,
+ricompilazione del programma timelock e confronto del suo SHA-256 con il README e con
+il `.so` committato (`scripts/check-timelock-hash.sh`).
 
 ## Stack
 
@@ -216,7 +286,8 @@ telefono/browser, in Solflare aggiungere il nodo custom, poi controllare il log:
 ## Struttura
 
 ```
-src/main.rs        CLI (genesis, run)
+src/main.rs        CLI (genesis, run, balance, eligible)
+src/stream/        stream WebSocket per bot e repliche, `Replica` che verifica tutto
 src/rpc/           gateway JSON-RPC + WebSocket per i wallet
 src/node.rs        apertura (snapshot + journal), ciclo di slot
 src/exec/          esecuzione blocchi, finestra blockhash, nonce, StateHasher
@@ -232,6 +303,7 @@ src/claims.rs      aventi diritto al residuo del fee mining (off-chain)
 - [x] Passo 1: genesis, transfer, blocco firmato, riavvio dal journal, stesso hash.
 - [x] Passo 2: fee mining 10/90, premio dal vault `mining`, rimborso priority fee, transizione.
 - [x] Passo 3: programma timelock (withdraw lineare, ondate di claim, to_reserve), aventi diritto dal journal.
-- [~] Passo 4: RPC e WebSocket fatti e verificati con web3.js; mancano stream, ingresso QUIC e test con Solflare.
+- [x] Passo 4: RPC, WebSocket, stream con recupero, limiti di ingresso, CI, `balance`.
+- [ ] Test con Solflare (guida e checklist in `docs/`); QUIC da valutare con le latenze misurate.
 
 Licenza: MIT.

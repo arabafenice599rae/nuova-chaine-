@@ -48,7 +48,7 @@ pub fn compute(g: &GenesisConfig, journal: &Path, airdrop: &BTreeSet<Address>) -
     let mut chain = genesis::build(g)?.0;
     let mut stats: BTreeMap<Address, (u64, BTreeSet<u64>)> = BTreeMap::new();
     let mut end: Option<(u64, u64)> = None;
-    Journal::open(journal, |b| {
+    Journal::open(journal, |b, _| {
         if end.is_some() {
             return Ok(());
         }

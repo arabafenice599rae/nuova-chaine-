@@ -1,19 +1,20 @@
-use std::path::PathBuf;
-use std::sync::{Arc, mpsc};
+use std::path::{Path, PathBuf};
 
 use centrifuga::genesis::{self, Config};
-use centrifuga::node::{Node, fmt_amount, read_keypair};
-use centrifuga::rpc::{self, BlockEvent, Gateway};
+use centrifuga::node::{fmt_amount, read_keypair};
 
-const USAGE: &str = "uso: centrifuga genesis|run [config.toml]\n     centrifuga eligible <config.toml> <lista_airdrop.txt> <output.txt>";
+const USAGE: &str = "uso: centrifuga genesis|run [config.toml]
+     centrifuga balance <pubkey> [url_rpc]          (default http://127.0.0.1:8899)
+     centrifuga eligible <config.toml> <lista_airdrop.txt> <output.txt>";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let cfg_path = PathBuf::from(args.get(2).map_or("centrifuga.toml", String::as_str));
+    let arg = |i: usize, default: &str| args.get(i).map_or(default.to_string(), String::clone);
     let res = match args.get(1).map(String::as_str) {
-        Some("genesis") => cmd_genesis(&cfg_path),
-        Some("run") => cmd_run(&cfg_path),
-        Some("eligible") if args.len() == 5 => cmd_eligible(&cfg_path, &args[3], &args[4]),
+        Some("genesis") => cmd_genesis(Path::new(&arg(2, "centrifuga.toml"))),
+        Some("run") => cmd_run(Path::new(&arg(2, "centrifuga.toml"))),
+        Some("balance") if args.len() >= 3 => cmd_balance(&args[2], &arg(3, "http://127.0.0.1:8899")),
+        Some("eligible") if args.len() == 5 => cmd_eligible(&PathBuf::from(&args[2]), &args[3], &args[4]),
         _ => Err(USAGE.to_string()),
     };
     if let Err(e) = res {
@@ -22,7 +23,7 @@ fn main() {
     }
 }
 
-fn cmd_genesis(path: &PathBuf) -> Result<(), String> {
+fn cmd_genesis(path: &Path) -> Result<(), String> {
     let cfg = Config::load(path)?;
     let sym = &cfg.node.token_symbol;
     let (chain, s) = genesis::build(&cfg.genesis)?;
@@ -40,8 +41,19 @@ fn cmd_genesis(path: &PathBuf) -> Result<(), String> {
     Ok(())
 }
 
+/// Saldo via JSON-RPC; il simbolo arriva da getVersion del nodo interrogato.
+fn cmd_balance(pubkey: &str, url: &str) -> Result<(), String> {
+    genesis::parse_address(pubkey)?;
+    let version = centrifuga::rpc::client::call(url, "getVersion", serde_json::json!([]))?;
+    let symbol = version["token"]["symbol"].as_str().unwrap_or("CnFA").to_string();
+    let r = centrifuga::rpc::client::call(url, "getBalance", serde_json::json!([pubkey]))?;
+    let lamports = r["value"].as_u64().ok_or("risposta getBalance non valida")?;
+    println!("{}", fmt_amount(lamports, &symbol));
+    Ok(())
+}
+
 /// Aventi diritto al residuo del fee mining, rieseguendo il journal da zero.
-fn cmd_eligible(path: &PathBuf, list: &str, out: &str) -> Result<(), String> {
+fn cmd_eligible(path: &Path, list: &str, out: &str) -> Result<(), String> {
     use centrifuga::claims;
     let cfg = Config::load(path)?;
     let text = std::fs::read_to_string(list).map_err(|e| format!("{list}: {e}"))?;
@@ -57,42 +69,10 @@ fn cmd_eligible(path: &PathBuf, list: &str, out: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_run(path: &PathBuf) -> Result<(), String> {
+fn cmd_run(path: &Path) -> Result<(), String> {
     let cfg = Config::load(path)?;
     let kp = read_keypair(&cfg.node.operator_keypair)?;
-    let addr = cfg.node.rpc_addr.parse().map_err(|e| format!("rpc_addr: {e}"))?;
-    let (qtx, qrx) = mpsc::channel();
-    let (etx, _) = tokio::sync::broadcast::channel(1024);
-    let gw = Gateway { queries: qtx, events: etx.clone(), trace: cfg.node.rpc_trace };
-    let (ready_tx, ready_rx) = mpsc::channel();
-    // Il nodo (litesvm) vive su un thread dedicato; l'RPC gli manda le query.
-    let node_thread = std::thread::spawn(move || {
-        let sym = cfg.node.token_symbol.clone();
-        let node = match Node::open(cfg, kp) {
-            Ok(n) => n,
-            Err(e) => return ready_tx.send(Err(e)).unwrap(),
-        };
-        println!("{}: altezza {}, hash {}", node.cfg.node.token_name, node.chain.height, node.chain.last_hash);
-        ready_tx.send(Ok(())).unwrap();
-        let res = node.serve(qrx, |_, ex| {
-            let _ = etx.send(Arc::new(BlockEvent::new(ex)));
-            if !ex.block.txs.is_empty() {
-                let s = &ex.settlement;
-                println!(
-                    "blocco {}: {} tx, fee base {}, operatore {}, riserva {}, premio {}, rimborso priority {}",
-                    ex.block.header.height, ex.block.txs.len(), fmt_amount(s.base, &sym), fmt_amount(s.operator, &sym),
-                    fmt_amount(s.reserve, &sym), fmt_amount(s.reward, &sym), fmt_amount(s.priority_refund, &sym),
-                );
-            }
-        });
-        if let Err(e) = res {
-            eprintln!("errore nodo: {e}");
-            std::process::exit(1);
-        }
-    });
-    ready_rx.recv().map_err(|e| e.to_string())??;
+    let running = centrifuga::node::start(cfg, kp)?;
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    rt.block_on(rpc::serve(gw, addr)).map_err(|e| format!("rpc: {e}"))?;
-    node_thread.join().ok();
-    Ok(())
+    rt.block_on(running.serve_network())
 }

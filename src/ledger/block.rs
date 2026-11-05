@@ -40,16 +40,24 @@ impl Block {
             body.update((b.len() as u32).to_le_bytes());
             body.update(&b);
         }
-        let h = &self.header;
+        self.header.hash_with_body(&body.finalize().into())
+    }
+}
+
+impl Header {
+    pub fn hash_with_body(&self, body_hash: &[u8; 32]) -> Hash {
+        let h = self;
         let mut d = Sha256::new();
         d.update(h.height.to_le_bytes());
         d.update(h.prev_hash.as_ref());
         d.update(h.timestamp_ms.to_le_bytes());
         d.update(h.state_hash.as_ref());
-        d.update(body.finalize());
+        d.update(body_hash);
         Hash::new_from_array(d.finalize().into())
     }
+}
 
+impl Block {
     pub fn sign(&mut self, kp: &Keypair) {
         self.header.signature = kp.sign_message(self.hash().as_ref());
     }

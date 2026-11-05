@@ -3,12 +3,15 @@
 
 pub mod encode;
 pub mod index;
+pub mod client;
 pub mod methods;
 mod ws;
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::fs::File;
+use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 
 use http_body_util::{BodyExt, Full, Limited};
@@ -46,8 +49,17 @@ impl BlockEvent {
 pub struct Gateway {
     pub queries: Sender<Query>,
     pub events: broadcast::Sender<Arc<BlockEvent>>,
-    /// Registra ogni metodo chiamato (per scoprire cosa chiedono i wallet).
-    pub trace: bool,
+    /// Log dei metodi ricevuti (per scoprire cosa chiedono i wallet): `rpc.log`.
+    pub log: Option<Arc<Mutex<File>>>,
+}
+
+/// Esito di una risposta JSON-RPC per il log.
+fn outcome(resp: &Value) -> String {
+    match resp["error"]["code"].as_i64() {
+        None => "ok".into(),
+        Some(-32601) => "NON_SUPPORTATO".into(),
+        Some(c) => format!("errore {c}"),
+    }
 }
 
 impl Gateway {
@@ -58,20 +70,34 @@ impl Gateway {
         rx.await.ok()
     }
 
-    pub async fn call(&self, req: Value) -> Value {
+    /// Una riga per richiesta: `unix_ms canale metodo esito`.
+    pub fn log(&self, channel: &str, method: &str, outcome: &str) {
+        if let Some(f) = &self.log {
+            let _ = writeln!(f.lock().unwrap(), "{} {channel} {method} {outcome}", crate::node::now_ms());
+        }
+    }
+
+    pub async fn call(&self, req: Value, peer: Option<IpAddr>) -> Value {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let Some(method) = req["method"].as_str().map(str::to_owned) else {
             return json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32600, "message": "Invalid request"}});
         };
-        if self.trace {
-            eprintln!("rpc: {method}");
-        }
         let params = req.get("params").cloned().unwrap_or(json!([]));
-        match self.query(move |n| methods::call(n, &method, &params)).await {
+        let m = method.clone();
+        let resp = match self.query(move |n| methods::call(n, &m, &params, peer)).await {
             Some(Ok(v)) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
-            Some(Err(e)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": e.code, "message": e.message, "data": e.data}}),
+            Some(Err(e)) => {
+                // `data: null` manda in errore web3.js: si omette se vuoto.
+                let mut err = json!({"code": e.code, "message": e.message});
+                if !e.data.is_null() {
+                    err["data"] = e.data;
+                }
+                json!({"jsonrpc": "2.0", "id": id, "error": err})
+            }
             None => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": "nodo non disponibile"}}),
-        }
+        };
+        self.log("http", &method, &outcome(&resp));
+        resp
     }
 }
 
@@ -86,10 +112,15 @@ fn reply(status: StatusCode, body: Vec<u8>) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
-async fn handle(gw: Gateway, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle(gw: Gateway, peer: IpAddr, req: Request<Incoming>) -> Result<Response<Full<Bytes>>, Infallible> {
     if req.method() == Method::OPTIONS {
         return Ok(reply(StatusCode::NO_CONTENT, vec![]));
     }
+    // Dietro un reverse proxy locale (HTTPS) il mittente reale è in X-Forwarded-For.
+    let peer = match req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        Some(xff) if peer.is_loopback() => xff.split(',').next().and_then(|ip| ip.trim().parse().ok()).unwrap_or(peer),
+        _ => peer,
+    };
     if req.method() == Method::GET && req.uri().path() == "/health" {
         return Ok(reply(StatusCode::OK, b"ok".to_vec()));
     }
@@ -100,11 +131,11 @@ async fn handle(gw: Gateway, req: Request<Incoming>) -> Result<Response<Full<Byt
         Ok(Value::Array(reqs)) => {
             let mut v = Vec::with_capacity(reqs.len());
             for r in reqs {
-                v.push(gw.call(r).await);
+                v.push(gw.call(r, Some(peer)).await);
             }
             json!(v)
         }
-        Ok(r) => gw.call(r).await,
+        Ok(r) => gw.call(r, Some(peer)).await,
         Err(_) => json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error"}}),
     };
     Ok(reply(StatusCode::OK, serde_json::to_vec(&out).unwrap()))
@@ -117,10 +148,10 @@ pub async fn serve(gw: Gateway, addr: SocketAddr) -> std::io::Result<()> {
     eprintln!("rpc: http://{addr}  ws://{}:{}", addr.ip(), addr.port() + 1);
     tokio::spawn(ws::serve(ws, gw.clone()));
     loop {
-        let (s, _) = http.accept().await?;
+        let (s, peer) = http.accept().await?;
         let gw = gw.clone();
         tokio::spawn(async move {
-            let svc = hyper::service::service_fn(move |r| handle(gw.clone(), r));
+            let svc = hyper::service::service_fn(move |r| handle(gw.clone(), peer.ip(), r));
             let io = hyper_util::rt::TokioIo::new(s);
             let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, svc).await;
         });
