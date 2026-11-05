@@ -34,7 +34,7 @@ fn node_hash(l: &H, r: &H) -> H {
 /// Albero binario denso: ogni account ha un indice di foglia fisso (ordine di
 /// creazione, deterministico); livelli completi fino alla potenza di 2.
 pub struct Merkle {
-    index: HashMap<Address, u32>,
+    pub index: HashMap<Address, u32>,
     pub levels: Vec<Vec<H>>, // levels[0] = foglie
 }
 
