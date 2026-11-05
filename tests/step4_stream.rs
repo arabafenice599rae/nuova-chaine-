@@ -22,6 +22,7 @@ const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 fn config(name: &str, port: u16, op: &Keypair, user: &Keypair, f: impl FnOnce(&mut Config)) -> Config {
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
     cfg.genesis.timestamp_ms = node::now_ms() - 86_400_000; // la replica rifiuta il futuro
     cfg.genesis.prefund.push(Prefund { pubkey: user.pubkey().to_string(), lamports: 100 * LAMPORTS_PER_CNFA });
@@ -141,6 +142,7 @@ async fn tampered_stream_is_rejected() {
             }
         }
     }
+    rep.apply(&next(&mut ws).await).unwrap(); // identità della chain
     rep.apply(&next(&mut ws).await).unwrap(); // blocco di ancoraggio
     rep.apply(&next(&mut ws).await).unwrap(); // sync completo
     let good = next(&mut ws).await;
@@ -194,7 +196,9 @@ async fn slow_client_is_dropped_without_slowing_blocks() {
         while let Some(Ok(m)) = ws.next().await {
             if let Message::Text(t) = m {
                 let v: Value = serde_json::from_str(&t).unwrap();
-                last = v["header"]["height"].as_u64().or(v["height"].as_u64()).unwrap();
+                if v["type"] != "chain" {
+                    last = v["header"]["height"].as_u64().or(v["height"].as_u64()).unwrap();
+                }
             }
         }
     })

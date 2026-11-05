@@ -16,6 +16,7 @@ fn config(dir: &str, op: &Keypair, payer: &Keypair) -> Config {
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.operator = op.pubkey().to_string();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.prefund.push(Prefund { pubkey: payer.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
     let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
     let _ = std::fs::remove_dir_all(&d);

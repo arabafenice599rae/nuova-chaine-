@@ -38,6 +38,17 @@ pub struct Params {
     pub mining_end_height: u64,
     pub vaults: Vaults,
     pub rules: Rules,
+    pub identity: Identity,
+}
+
+/// Identità della chain, fissata nel genesis (e nel suo hash).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// "centrifuga:mainnet" o "centrifuga:devnet".
+    pub chain_id: String,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
 }
 
 /// Regole di validità dell'header tra un blocco e il successivo (parte del genesis).
@@ -82,6 +93,12 @@ impl Params {
         for v in [&self.vaults.mining, &self.vaults.airdrop, &self.vaults.reserve] {
             d.update(v.as_ref());
         }
+        let id = &self.identity;
+        for s in [&id.chain_id, &id.name, &id.symbol] {
+            d.update((s.len() as u32).to_le_bytes());
+            d.update(s.as_bytes());
+        }
+        d.update([id.decimals]);
         Hash::new_from_array(d.finalize().into())
     }
 }

@@ -27,6 +27,7 @@ fn eligibility_from_journal() {
     ];
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
     cfg.genesis.fee_mining_end_height = END;
     for (k, ..) in &users {

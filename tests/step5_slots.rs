@@ -20,6 +20,7 @@ const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 fn cfg(op: &Keypair, user: &Keypair) -> Config {
     let mut c: Config = toml::from_str(EXAMPLE).unwrap();
     c.genesis.network = "devnet".into();
+    c.genesis.chain_id = "centrifuga:devnet".into();
     c.genesis.operator = op.pubkey().to_string();
     // Genesis di ieri: i blocchi dei test sono nel passato per la replica in tempo reale.
     c.genesis.timestamp_ms = node::now_ms() - 86_400_000;

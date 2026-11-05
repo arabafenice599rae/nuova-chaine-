@@ -200,12 +200,12 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
     };
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let sym = cfg.node.token_symbol.clone();
+        let sym = cfg.genesis.symbol.clone();
         let node = match Node::open(cfg, keypair) {
             Ok(n) => n,
             Err(e) => return drop(ready_tx.send(Err(e))),
         };
-        println!("{}: altezza {}, hash {}", node.cfg.node.token_name, node.chain.height, node.chain.last_hash);
+        println!("{} ({}): altezza {}, hash {}", node.cfg.genesis.chain_name, node.cfg.genesis.chain_id, node.chain.height, node.chain.last_hash);
         let _ = ready_tx.send(Ok(()));
         let res = node.serve(qrx, |n, ex| {
             let _ = events.send(Arc::new(BlockEvent::new(ex)));

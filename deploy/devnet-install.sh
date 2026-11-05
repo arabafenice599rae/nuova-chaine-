@@ -98,6 +98,7 @@ else
   log "config devnet e prefund"
   now_ms=$(( $(date +%s) * 1000 ))
   sed -e 's/^network = .*/network = "devnet"/' \
+      -e 's/^chain_id = .*/chain_id = "centrifuga:devnet"/' \
       -e "s/^operator = .*/operator = \"$OPERATOR\"/" \
       -e "s/^timestamp_ms = .*/timestamp_ms = $now_ms/" \
       -e "s|^data_dir = .*|data_dir = \"$VAR/data\"|" \

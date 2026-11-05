@@ -24,6 +24,7 @@ fn setup(payers: &[&Keypair], f: impl FnOnce(&mut Config)) -> T {
     let op = Keypair::new();
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
     for p in payers.iter().copied().chain([&op]) {
         cfg.genesis.prefund.push(Prefund { pubkey: p.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });
@@ -207,6 +208,7 @@ fn replay_reproduces_fee_settlement() {
     let mut t = setup(&[&a, &b], f);
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = t.op.pubkey().to_string();
     for p in [&a, &b, &t.op] {
         cfg.genesis.prefund.push(Prefund { pubkey: p.pubkey().to_string(), lamports: 10 * LAMPORTS_PER_CNFA });

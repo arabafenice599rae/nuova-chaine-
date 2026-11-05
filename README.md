@@ -3,7 +3,7 @@
 Chain pubblica compatibile con Solana (SVM) a **validatore unico**, in un solo binario.
 Nessun consenso, nessun voto, nessun relay: chi costruisce il blocco è chi lo firma.
 
-Token nativo: **CENTRIFUGA**, simbolo **CnFA** (forma canonica), 9 decimali. È il lamport
+Chain **Centrifuga** (`centrifuga:mainnet`, `centrifuga:devnet`), token nativo con simbolo **CnFA** (forma canonica), 9 decimali. È il lamport
 dell'SVM: i wallet esterni lo mostreranno comunque come "SOL".
 Supply fissa di 100.000.000 CnFA, zero inflazione, zero staking.
 
@@ -192,14 +192,15 @@ Metodi HTTP: `getBalance`, `getAccountInfo`, `getMultipleAccounts`,
 `getFeeForMessage`, `getMinimumBalanceForRentExemption`,
 `getRecentPrioritizationFees`, `simulateTransaction`, `sendTransaction`,
 `getSignatureStatuses`, `getSignaturesForAddress`, `getTransaction`, `getVersion`,
-`getHealth`. WebSocket: `accountSubscribe`, `signatureSubscribe` (e unsubscribe).
+`getHealth`, `getChainInfo` (identità della chain, anche su `GET /chain.json`: vedi
+[docs/chain-identity.md](docs/chain-identity.md)). WebSocket: `accountSubscribe`, `signatureSubscribe` (e unsubscribe).
 
 Differenze da Solana, per scelta:
 - tutto è subito `finalized` (un solo firmatario, nessun fork); `commitment` è ignorato;
 - nessuna epoca: `getEpochInfo` riporta `epoch: 0`;
 - `getRecentPrioritizationFees` è sempre 0: la priority fee non compra posizione;
 - `getFeeForMessage` riporta solo la fee base (la priority fee è rimborsata);
-- `getVersion` aggiunge `centrifuga` e `token: {name, symbol, decimals}`;
+- `getVersion` aggiunge `centrifuga`, `chainId` e `token: {name, symbol, decimals}`;
 - `jsonParsed`: token account e mint SPL interpretati; transazioni in forma
   parzialmente decodificata (istruzioni con `programId`, `data` in base58);
   `preTokenBalances`/`postTokenBalances` e `innerInstructions` vuoti;

@@ -26,6 +26,7 @@ fn setup() -> T {
     let (op, user) = (Keypair::new(), Keypair::new());
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.network = "devnet".into();
+    cfg.genesis.chain_id = "centrifuga:devnet".into();
     cfg.genesis.operator = op.pubkey().to_string();
     cfg.genesis.operator_unlock_blocks = 100;
     cfg.genesis.reserve_unlock_height = 10;
