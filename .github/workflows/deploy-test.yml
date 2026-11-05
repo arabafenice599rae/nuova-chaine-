@@ -1,0 +1,66 @@
+name: Deploy devnet (test)
+
+# Esegue deploy/devnet-install.sh su un runner con systemd, con un certificato
+# della CA locale di Caddy (--tls-internal, solo test: nessun dominio pubblico).
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: install, systemd, HTTPS, WebSocket, stream, latenza
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DOMAIN: centrifuga.test
+      OUT: ${{ github.workspace }}/out
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: dominio di test su 127.0.0.1
+        run: |
+          echo "127.0.0.1 $DOMAIN" | sudo tee -a /etc/hosts
+          mkdir -p "$OUT"
+      - name: chiave di benchmark usa e getta (creata sul runner)
+        working-directory: tests/web3
+        run: |
+          npm ci
+          node latency.mjs "https://$DOMAIN" "$RUNNER_TEMP/bench.json" || test $? -eq 2
+          echo "BENCH_PK=$(node -e "const w=require('@solana/web3.js');console.log(w.Keypair.fromSecretKey(Uint8Array.from(require('$RUNNER_TEMP/bench.json'))).publicKey.toBase58())")" >> "$GITHUB_ENV"
+      - name: installazione (root, come su un VPS)
+        run: |
+          set -o pipefail
+          sudo deploy/devnet-install.sh --domain "$DOMAIN" --email ci@example.invalid \
+            --tls-internal --prefund "$BENCH_PK:50" 2>&1 | tee "$OUT/install.log"
+      - name: verifiche
+        run: sudo env "PATH=$PATH" deploy/ci-check.sh "$DOMAIN" "$RUNNER_TEMP/bench.json" "$OUT"
+      - name: latenza (stessa macchina, via Caddy e TLS)
+        working-directory: tests/web3
+        run: |
+          sudo cp /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/ca.crt"
+          sudo chmod 644 "$RUNNER_TEMP/ca.crt"
+          {
+            echo "## Latenza (client e nodo sulla STESSA macchina del runner GitHub, via Caddy e TLS)"
+            echo "Non è una misura da rete esterna: non va usata per decidere su QUIC."
+            echo '```'
+            NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/ca.crt" node latency.mjs "https://$DOMAIN" "$RUNNER_TEMP/bench.json" 200
+            echo '```'
+          } | tee "$OUT/latenza.md"
+      - name: rapporto
+        if: always()
+        run: |
+          {
+            echo "## Verifiche del deploy"
+            echo '```'
+            cat "$OUT/rapporto.txt" 2>/dev/null || echo "rapporto mancante"
+            echo '```'
+            cat "$OUT/latenza.md" 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          sudo chmod -R a+rX "$OUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deploy-test
+          path: out/

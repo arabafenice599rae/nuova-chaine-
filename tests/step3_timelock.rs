@@ -59,6 +59,11 @@ impl T {
             self.c.produce(vec![], self.t, &self.op);
         }
     }
+    /// Salta gli slot vuoti: il prossimo blocco sarà all'altezza `height`.
+    fn jump(&mut self, height: u64) {
+        self.t += 100;
+        self.c.produce_at(height - 1, vec![], self.t, &self.op);
+    }
     fn bal(&self, k: &Address) -> u64 {
         self.c.svm.lamports(k)
     }
@@ -207,4 +212,42 @@ fn airdrop_deadline_and_permissionless_to_reserve() {
     assert_eq!(t.spendable("airdrop"), 0);
     assert!(t.bal(&vault_address("reserve")) >= reserve0 + left);
     t.to_reserve(&funded).unwrap(); // idempotente: sposta 0
+}
+
+#[test]
+fn unlocks_and_deadline_crossed_by_height_jumps() {
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    let opk = op.pubkey();
+    // Withdraw lineare a un'altezza raggiunta con un salto: 40/100 = 40%.
+    let start = t.bal(&opk);
+    t.jump(40);
+    t.withdraw("operator", opk).unwrap();
+    assert_eq!(t.bal(&opk) - start, OPERATOR_TOTAL / 100 * 40 + 5_000);
+    // Airdrop: la scadenza dei claim (30) è stata superata dal salto a 40.
+    let x = Address::new_unique();
+    let wave = t.wave("airdrop", LAMPORTS_PER_CNFA, 8, &op).unwrap();
+    assert_err(t.claim("airdrop", wave, x, LAMPORTS_PER_CNFA, 0, &op, x), 4);
+    let funded = Keypair::try_from(t.user.to_bytes().as_slice()).unwrap();
+    t.to_reserve(&funded).unwrap();
+    assert_eq!(t.spendable("airdrop"), 0);
+}
+
+#[test]
+fn reserve_unlock_crossed_by_height_jump() {
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    let five = 5 * LAMPORTS_PER_CNFA;
+    let wave = t.wave("reserve", five, 8, &op).unwrap(); // altezza 1
+    let x = Address::new_unique();
+    assert_err(t.claim("reserve", wave, x, five, 0, &op, x), 4); // altezza 2 < 10
+    t.jump(10_000); // ben oltre lo sblocco, senza passare per l'altezza 10
+    t.claim("reserve", wave, x, five, 0, &op, x).unwrap();
+    assert_eq!(t.bal(&x), five);
+    // Airdrop: un claim prima della scadenza riesce anche dopo un salto che resta sotto.
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    let wave = t.wave("airdrop", five, 8, &op).unwrap();
+    t.jump(29);
+    t.claim("airdrop", wave, x, five, 0, &op, x).unwrap(); // altezza 29 < 30
 }

@@ -14,6 +14,7 @@ trap 'kill "$NODE" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 sed -e "s/SOSTITUIRE_CON_PUBKEY_OPERATORE/$(cut -d' ' -f2 "$WORK/op.txt")/" \
     -e 's/network = "mainnet"/network = "devnet"/' \
     -e "s/^slot_ms = .*/slot_ms = $SLOT/" \
+    -e "s/^timestamp_ms = .*/timestamp_ms = $(( $(date +%s) * 1000 ))/" \
     -e "s|^data_dir = .*|data_dir = \"$WORK/data\"|" \
     -e "s|^operator_keypair = .*|operator_keypair = \"$WORK/operator.json\"|" \
     -e 's/^rpc_log = false/rpc_log = true/' \

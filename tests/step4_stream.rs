@@ -29,6 +29,7 @@ fn config(name: &str, port: u16, op: &Keypair, user: &Keypair, f: impl FnOnce(&m
     cfg.node.data_dir = dir;
     cfg.node.rpc_addr = format!("127.0.0.1:{port}");
     cfg.node.stream_addr = format!("127.0.0.1:{}", port + 2);
+    cfg.node.heartbeat_slots = 1; // qui si testa lo stream: un blocco a ogni slot
     f(&mut cfg);
     cfg
 }

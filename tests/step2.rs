@@ -40,6 +40,11 @@ impl T {
         assert_eq!(ex.block.txs.len(), ex.results.len());
         ex.settlement
     }
+    /// Blocco all'altezza `h` (salto di slot vuoti, come col nodo vero).
+    fn block_at(&mut self, h: u64, txs: Vec<VersionedTransaction>) -> Settlement {
+        self.t += 100;
+        self.c.produce_at(h, txs, self.t, &self.op).settlement
+    }
     fn bal(&self, k: &Address) -> u64 {
         self.c.svm.lamports(k)
     }
@@ -224,4 +229,28 @@ fn prefund_rejected_on_mainnet() {
     // Il controllo di determinismo usa una copia devnet e resta possibile su mainnet.
     cfg.genesis.prefund.clear();
     genesis::check_determinism(&cfg.genesis, 3, 100).unwrap();
+}
+
+#[test]
+fn halving_and_end_crossed_by_height_jumps() {
+    let a = Keypair::new();
+    let mut t = setup(&[&a], |c| {
+        c.genesis.block_budget_lamports = 1_000;
+        c.genesis.halving_blocks = 100;
+        c.genesis.fee_mining_end_height = 1_000;
+    });
+    let to = Address::new_unique();
+    // Altezza 250 raggiunta con un salto: due dimezzamenti (1.000 -> 250).
+    t.block_at(240, vec![]);
+    let s = t.block_at(250, vec![transfer_tx(&a, &to, 1, t.c.last_hash)]);
+    assert_eq!((s.mining_active, s.reward), (true, 250));
+    // Salto oltre la fine (da 990 a 1.200): il primo blocco dopo chiude il periodo,
+    // una sola volta. La tx usa il blockhash del 990 (entro 300 slot).
+    let (airdrop0, left) = (t.bal(&vault_address("airdrop")), t.mining());
+    t.block_at(990, vec![]);
+    let s = t.block_at(1_200, vec![transfer_tx(&a, &to, 2, t.c.last_hash)]);
+    assert_eq!((s.mining_active, s.operator, s.reward, s.to_airdrop), (false, 5_000, 0, left));
+    assert_eq!(t.bal(&vault_address("airdrop")), airdrop0 + left);
+    assert_eq!(t.block_at(9_000, vec![]).to_airdrop, 0);
+    assert_eq!(t.c.total_lamports(), SUPPLY_LAMPORTS as u128);
 }

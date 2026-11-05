@@ -27,23 +27,30 @@ Tutto tranne censura e ordine di arrivo è verificabile da chiunque rieseguendo 
 
 Ogni blocco è firmato dall'operatore. La firma copre
 `sha256(altezza ‖ hash_precedente ‖ timestamp ‖ hash_stato ‖ sha256(corpo))`.
-**Due header con firma valida e la stessa altezza ma hash diverso** sono una prova
+**Due header diversi con firma valida e la stessa altezza, oppure lo stesso
+blocco precedente** (un fork, anche ad altezze diverse) sono una prova
 crittografica che l'operatore ha creato un fork: chiunque li possieda può pubblicarli.
 Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra prova.
 
 ## Blocchi
 
-- Slot ogni 100 ms (`slot_ms`), anche vuoti: le altezze misurano il tempo
-  (sblocchi dei vault, fee mining).
+- Slot ogni 100 ms (`slot_ms`); **altezza di un blocco = numero del suo slot**
+  dal timestamp del genesis, quindi le altezze misurano il tempo reale (sblocchi dei
+  vault, fee mining, scadenze), anche dopo un fermo del nodo.
+- Un blocco esce solo se ci sono transazioni in coda, oppure ogni `heartbeat_slots`
+  slot (default 10 = 1 s) come segnale di presenza: tra due blocchi le altezze possono
+  saltare. Un blocco vuoto occupa 152 byte: con l'heartbeat a 1 s il journal cresce di
+  ~13 MB al giorno senza traffico (contro ~130 MB con un blocco a ogni slot).
 - Header: altezza, hash precedente, timestamp (ms, monotono:
   `max(ora, precedente + 1)`), hash di stato, firma dell'operatore. Corpo: le tx
   nell'ordine eseguito.
 - A ogni blocco la sysvar Clock riceve `slot = altezza` e `unix_timestamp`.
 - Hash di stato: SHA-256 su tutti gli account ordinati per pubkey (dietro
   l'interfaccia `StateHasher`, sostituibile da un hasher incrementale).
-- Blockhash = hash del blocco. Una tx è valida se il suo blockhash è tra gli ultimi
-  N blocchi (`blockhash_window`, default 300 ≈ 30 s), oppure se usa un durable nonce
-  valido. Filtro anti-duplicati sulle firme degli ultimi N blocchi.
+- Blockhash = hash del blocco. Il blockhash del blocco all'altezza h vale nei blocchi
+  fino all'altezza h + N (`blockhash_window`, default 300 slot = 30 s), oppure la tx
+  usa un durable nonce valido. Anti-duplicati: le firme restano note per lo stesso
+  intervallo. `getLatestBlockhash` riporta `lastValidBlockHeight` = h + N.
 - Ordine: FIFO rigoroso per seq di arrivo. La priority fee **non** cambia l'ordine.
 
 ## Persistenza

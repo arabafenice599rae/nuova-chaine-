@@ -60,6 +60,8 @@ pub struct NodeConfig {
     pub token_name: String,
     pub token_symbol: String,
     pub slot_ms: u64,
+    /// Senza transazioni, un blocco ogni `heartbeat_slots` slot (presenza e tempo).
+    pub heartbeat_slots: u64,
     pub data_dir: PathBuf,
     pub operator_keypair: PathBuf,
     pub snapshot_every: u64,

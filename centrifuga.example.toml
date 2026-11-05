@@ -4,6 +4,7 @@
 token_name = "CENTRIFUGA"
 token_symbol = "CnFA"           # forma canonica: non normalizzare maiuscole/minuscole
 slot_ms = 100
+heartbeat_slots = 10            # senza tx: un blocco al secondo; l'altezza è lo slot
 data_dir = "data"
 operator_keypair = "operator.json"  # formato solana-keygen (array JSON di 64 byte)
 snapshot_every = 3000           # blocchi (5 minuti a 100 ms)

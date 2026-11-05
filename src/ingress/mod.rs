@@ -135,6 +135,10 @@ impl Ingress {
             .collect()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().unwrap().txs.is_empty()
+    }
+
     /// Preleva fino a `max` transazioni in ordine di seq.
     pub fn drain(&self, max: usize) -> Vec<VersionedTransaction> {
         let mut q = self.queue.lock().unwrap();

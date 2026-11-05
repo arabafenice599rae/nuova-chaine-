@@ -84,10 +84,16 @@ impl Node {
         Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_offset, journal, dir, keypair })
     }
 
-    /// Un ciclo di slot: preleva in ordine FIFO, esegue, firma, scrive nel journal.
+    /// Slot corrente dal tempo reale (dal timestamp del genesis), sempre oltre l'ultimo blocco.
+    pub fn slot(&self, now_ms: u64) -> u64 {
+        let elapsed = now_ms.saturating_sub(self.cfg.genesis.timestamp_ms) / self.cfg.node.slot_ms.max(1);
+        elapsed.max(self.chain.height + 1)
+    }
+
+    /// Produce un blocco allo slot corrente: preleva in ordine FIFO, esegue, firma, scrive nel journal.
     pub fn tick(&mut self, now_ms: u64) -> Result<Executed, String> {
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
-        let ex = self.chain.produce(txs, now_ms, &self.keypair);
+        let ex = self.chain.produce_at(self.slot(now_ms), txs, now_ms, &self.keypair);
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
         self.index.record(&ex);
         for tx in &ex.block.txs {
@@ -110,16 +116,23 @@ impl Node {
         Ok(ex)
     }
 
-    /// Ciclo principale: un blocco ogni slot; tra un blocco e l'altro esegue le query.
+    /// Ciclo principale: a ogni slot un blocco se ci sono tx in coda, oppure se
+    /// da `heartbeat_slots` slot non ne esce uno; tra uno slot e l'altro, le query.
     pub fn serve(mut self, queries: Receiver<Query>, mut on_block: impl FnMut(&Node, &Executed)) -> Result<(), String> {
         let slot = Duration::from_millis(self.cfg.node.slot_ms);
+        let heartbeat = slot * self.cfg.node.heartbeat_slots.max(1) as u32;
         let mut next = Instant::now() + slot;
+        let mut last_block = Instant::now();
         loop {
             let now = Instant::now();
             if now >= next {
-                let ex = self.tick(crate::node::now_ms())?;
-                on_block(&self, &ex);
                 next = (next + slot).max(now);
+                if self.ingress.is_empty() && now.duration_since(last_block) + slot / 2 < heartbeat {
+                    continue; // slot vuoto: nessun blocco
+                }
+                let ex = self.tick(crate::node::now_ms())?;
+                last_block = now;
+                on_block(&self, &ex);
                 // Anche se la produzione non sta nello slot, le query non restano mai ferme.
                 if let Ok(q) = queries.try_recv() {
                     q(&mut self);

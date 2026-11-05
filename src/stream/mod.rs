@@ -276,7 +276,8 @@ impl Replica {
                 // dall'operatore): vale solo se segue uno stato completo.
                 let accounts = field(&v, "accounts")?;
                 let anchored = self.height > 0 || self.last_hash != Hash::default();
-                let contiguous = block.header.height == self.height + 1 && block.header.prev_hash == self.last_hash;
+                // L'altezza è lo slot: può saltare, ma cresce e punta all'ultimo blocco.
+                let contiguous = block.header.height > self.height && block.header.prev_hash == self.last_hash;
                 if anchored && !contiguous {
                     if !accounts.is_null() || block.header.height <= self.height {
                         return Err(format!("blocco {}: non concatenato a {}", block.header.height, self.height));
