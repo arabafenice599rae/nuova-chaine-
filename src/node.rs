@@ -122,7 +122,8 @@ impl Node {
         let slot = Duration::from_millis(self.cfg.node.slot_ms);
         let heartbeat = slot * self.cfg.node.heartbeat_slots.max(1) as u32;
         let mut next = Instant::now() + slot;
-        let mut last_block = Instant::now();
+        // Primo blocco al primo slot: dopo un avvio o un riavvio l'altezza è subito quella reale.
+        let mut last_block = Instant::now().checked_sub(heartbeat).unwrap_or_else(Instant::now);
         loop {
             let now = Instant::now();
             if now >= next {

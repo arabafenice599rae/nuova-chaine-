@@ -23,8 +23,10 @@ printf '\n[[genesis.prefund]]\npubkey = "%s"\nlamports = 100000000000\n' "$(cut 
 
 "$BIN/centrifuga" run "$WORK/centrifuga.toml" > "$WORK/node.log" 2>&1 &
 NODE=$!
+# Pronto quando risponde e ha prodotto almeno un blocco.
 for _ in $(seq 50); do
-  curl -sf http://127.0.0.1:8899/health > /dev/null && break
+  curl -sf http://127.0.0.1:8899 -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getSlot"}' | grep -qv '"result":0' && break
   sleep 0.2
 done
 cd "$ROOT/tests/web3"
