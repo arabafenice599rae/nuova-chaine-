@@ -121,7 +121,7 @@ async fn replica_rebuilds_state_from_stream_only() {
 
     // Stesso stato del nodo: hash verificato contro l'header firmato, e saldo atteso.
     let expected = 4 * LAMPORTS_PER_CNFA + 3;
-    assert_eq!(rep.accounts[&to].lamports(), expected);
+    assert_eq!(rep.accounts()[&to].lamports(), expected);
     let node_balance = gw.query(move |n: &mut Node| n.chain.svm.lamports(&to)).await.unwrap();
     assert_eq!(node_balance, expected);
 }

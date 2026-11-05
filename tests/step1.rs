@@ -106,13 +106,13 @@ fn restart_from_journal_and_snapshot() {
         assert_eq!(n.ingress.submit(None, vec![tx]), vec![Ok(i - 1)]);
         n.tick(t0 + i * 100).unwrap();
     }
-    let (h, state) = (n.chain.last_hash, n.chain.state_hash(&Default::default()));
+    let (h, state) = (n.chain.last_hash, n.chain.state_hash());
     drop(n);
 
     // Riavvio: snapshot all'altezza 8 + journal 9..10.
     let mut n = Node::open(cfg.clone(), kp()).unwrap();
     assert_eq!((n.chain.height, n.chain.last_hash), (10, h));
-    assert_eq!(n.chain.state_hash(&Default::default()), state);
+    assert_eq!(n.chain.state_hash(), state);
     // Il blockhash del blocco 9 è ancora valido dopo il riavvio.
     let tx = transfer_tx(&payer, &Address::new_unique(), 1, n.chain.last_hash);
     n.ingress.submit(None, vec![tx]);

@@ -70,7 +70,7 @@ impl Node {
             last_offset = Some(offset);
             if b.header.height <= snap_height {
                 if b.header.height == snap_height {
-                    let h = chain.state_hash(&Default::default());
+                    let h = chain.state_hash();
                     if h != b.header.state_hash {
                         return Err(format!("snapshot {snap_height}: state hash differs from the journal"));
                     }
