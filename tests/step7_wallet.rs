@@ -137,7 +137,6 @@ async fn wallet_against_devnet_node() {
     c.indexer = Some(centrifuga::genesis::IndexerConfig {
         data_dir: dir.join("indexer"),
         rpc_addr: "127.0.0.1:19174".into(),
-        storage: "segments".into(),
         retention_blocks: 0,
         segment_txs: 1_000,
         snapshot_every: 50,

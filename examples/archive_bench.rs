@@ -1,6 +1,7 @@
 //! Confronto dei moduli di archiviazione dello storico, sugli stessi record.
-//!   cargo run --release --features redb-archive --example archive_bench -- [tx] [tx_per_block]
-//!   cargo run --release --example archive_bench -- --node <accounts> <archivio> [blocks]
+//!   cargo run --release --example archive_bench -- [tx] [tx_per_block]
+//!   cargo run --release --example archive_bench -- --node <accounts> segments [blocks]
+//! (Il confronto con l'archivio a pagine e con redb è in docs/history.md.)
 //! --node: limite del nodo (carico massimo con p99 del blocco < 100 ms) senza e con
 //! l'indexer in esecuzione sulla stessa macchina, e crescita del disco per ora.
 //! Per ogni archivio: scrittura (tx/s, p50/p99 per blocco), byte per tx, lettura per
@@ -26,9 +27,6 @@ fn pct(v: &mut [f64], q: f64) -> f64 {
 fn open(kind: &str, dir: &Path) -> Box<dyn Archive> {
     match kind {
         "segments" => Box::new(centrifuga::archive::segments::Segments::open(dir, 1_000_000).unwrap()),
-        "pages" => Box::new(centrifuga::archive::pages::Pages::open(dir).unwrap()),
-        #[cfg(feature = "redb-archive")]
-        "redb" => Box::new(centrifuga::archive::redb::Redb::open(dir).unwrap()),
         _ => panic!("{kind}"),
     }
 }
@@ -66,10 +64,7 @@ fn main() {
     let busy = senders[0].pubkey();
     let sample: Vec<Signature> = (0..10_000u64).map(|i| all[(i * 7 % blocks) as usize][(i * 13 % per) as usize].tx.signatures[0]).collect();
     let base = PathBuf::from(std::env::var("LOAD_DIR").unwrap_or_else(|_| "/tmp/archive-bench".into()));
-    let mut kinds = vec!["segments", "pages"];
-    if cfg!(feature = "redb-archive") {
-        kinds.push("redb");
-    }
+    let kinds = vec!["segments"];
     println!("{total} tx in blocchi da {per}");
     println!("| archivio | scrittura tx/s | blocco p50 / p99 ms | byte/tx | get p50 / p99 µs | get assente µs | cronologia 10 µs | checkpoint ms | riapertura s | dopo arresto a metà s | conservazione (metà) s |");
     for kind in kinds {
@@ -180,7 +175,7 @@ fn node_limit(n: u64, storage: &str, blocks: usize) {
     let _ = std::fs::remove_dir_all(&base);
     cfg.node.data_dir = base.join("node");
     std::fs::create_dir_all(&cfg.node.data_dir).unwrap();
-    cfg.indexer = Some(IndexerConfig { data_dir: base.join("indexer"), rpc_addr: "127.0.0.1:0".into(), storage: storage.into(), retention_blocks: 0, segment_txs: 1_000_000, snapshot_every: 0 });
+    cfg.indexer = Some(IndexerConfig { data_dir: base.join("indexer"), rpc_addr: "127.0.0.1:0".into(), retention_blocks: 0, segment_txs: 1_000_000, snapshot_every: 0 });
     let mut chain = centrifuga::genesis::build(&cfg.genesis).unwrap().0;
     let rent = chain.svm.rent_exempt(0);
     for i in 0..n {

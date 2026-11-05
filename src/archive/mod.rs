@@ -1,13 +1,9 @@
-//! Storico delle transazioni (fuori dal nodo): record comuni, formato binario e
-//! interfaccia dei moduli di archiviazione usati dall'indexer.
-//!   pages     registro + indice a pagine scritto a mano (primo prototipo);
-//!   segments  file di segmenti append-only con indice per segmento;
-//!   redb      database embedded `redb` (solo con la feature `redb-archive`).
+//! Storico delle transazioni (fuori dal nodo): record, formato binario e interfaccia
+//! dell'archivio dell'indexer. Archivio: file di segmenti append-only (`segments`),
+//! scelto dopo il confronto con un archivio a pagine scritto a mano e con redb
+//! (docs/history.md).
 
-pub mod pages;
 pub mod segments;
-#[cfg(feature = "redb-archive")]
-pub mod redb;
 
 use std::io;
 

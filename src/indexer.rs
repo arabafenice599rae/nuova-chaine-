@@ -25,13 +25,7 @@ pub type Shared = Arc<Mutex<Box<dyn Archive>>>;
 pub fn open_archive(c: &IndexerConfig) -> Result<Box<dyn Archive>, String> {
     let dir = c.data_dir.join("archive");
     let e = |x: io::Error| format!("archivio: {x}");
-    Ok(match c.storage.as_str() {
-        "segments" => Box::new(crate::archive::segments::Segments::open(&dir, c.segment_txs).map_err(e)?),
-        "pages" => Box::new(crate::archive::pages::Pages::open(&dir).map_err(e)?),
-        #[cfg(feature = "redb-archive")]
-        "redb" => Box::new(crate::archive::redb::Redb::open(&dir).map_err(e)?),
-        s => return Err(format!("storage sconosciuto: {s}")),
-    })
+    Ok(Box::new(crate::archive::segments::Segments::open(&dir, c.segment_txs).map_err(e)?))
 }
 
 /// Blocco del journal a `off` (None se incompleto: il nodo lo sta ancora scrivendo).
@@ -196,7 +190,7 @@ pub fn run(cfg: Config) -> Result<(), String> {
     let c = cfg.indexer.clone().ok_or("manca la sezione [indexer]")?;
     let journal = cfg.node.data_dir.join("journal.bin");
     let ix = Indexer::open(&cfg, &journal)?;
-    eprintln!("indexer: altezza {}, archivio {}", ix.chain.height, c.storage);
+    eprintln!("indexer: altezza {}, archivio a segmenti in {}", ix.chain.height, c.data_dir.display());
     let archive = ix.archive.clone();
     let addr = c.rpc_addr.parse().map_err(|e| format!("rpc_addr: {e}"))?;
     std::thread::spawn(move || {

@@ -95,9 +95,6 @@ pub struct NodeConfig {
 pub struct IndexerConfig {
     pub data_dir: PathBuf,
     pub rpc_addr: String,
-    /// "segments" (default), "pages" o "redb" (solo con la feature redb-archive).
-    #[serde(default = "default_storage")]
-    pub storage: String,
     /// Blocchi da conservare (0 = tutti).
     #[serde(default)]
     pub retention_blocks: u64,
@@ -302,10 +299,6 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
 
 fn default_rpc_recent_txs() -> usize {
     20_000
-}
-
-fn default_storage() -> String {
-    "segments".into()
 }
 
 fn default_segment_txs() -> u64 {

@@ -48,7 +48,6 @@ claims_end_height = 708480000         # 24 mesi + 90 giorni: poi airdrop -> rese
 # [indexer]
 # data_dir = "./data-indexer"
 # rpc_addr = "127.0.0.1:8903"
-# storage = "segments"        # segments | pages | redb (feature redb-archive)
 # retention_blocks = 0        # 0 = tutto; es. 864000 = un giorno a 100 ms
 # segment_txs = 1000000
 # snapshot_every = 3000

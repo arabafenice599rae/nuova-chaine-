@@ -34,7 +34,7 @@ struct Run {
 }
 
 /// Nodo con finestra degli stati di 20 blocchi e 5 tx in RAM; 30 blocchi da 3 tx.
-fn run(name: &str, storage: &str) -> Run {
+fn run(name: &str) -> Run {
     let (op, a, b) = (Keypair::new(), Keypair::new(), Keypair::new());
     let mut cfg: Config = toml::from_str(EXAMPLE).unwrap();
     cfg.genesis.operator = op.pubkey().to_string();
@@ -49,7 +49,7 @@ fn run(name: &str, storage: &str) -> Run {
     cfg.node.data_dir = dir.join("node");
     cfg.node.snapshot_every = 7;
     cfg.node.rpc_recent_txs = 5;
-    cfg.indexer = Some(IndexerConfig { data_dir: dir.join("indexer"), rpc_addr: "127.0.0.1:0".into(), storage: storage.into(), retention_blocks: 0, segment_txs: 10, snapshot_every: 9 });
+    cfg.indexer = Some(IndexerConfig { data_dir: dir.join("indexer"), rpc_addr: "127.0.0.1:0".into(), retention_blocks: 0, segment_txs: 10, snapshot_every: 9 });
     let mut n = Node::open(cfg.clone(), Keypair::try_from(op.to_bytes().as_slice()).unwrap()).unwrap();
     let to = Address::new_unique();
     let (mut seen, mut a_sigs) = (vec![], vec![]);
@@ -75,7 +75,7 @@ fn run(name: &str, storage: &str) -> Run {
 
 #[test]
 fn node_keeps_only_a_bounded_window() {
-    let r = run("history_node", "segments");
+    let r = run("history_node");
     let mut n = Node::open(r.cfg.clone(), Keypair::try_from(r.op.to_bytes().as_slice()).unwrap()).unwrap();
     let check = |n: &mut Node, what: &str| {
         let (old, last) = (r.seen[0].0.to_string(), r.seen.last().unwrap().0.to_string());
@@ -102,8 +102,9 @@ fn history(ix: &Indexer, a: &Address, cfg: Value) -> Vec<String> {
     ix_call(ix, "getSignaturesForAddress", json!([a.to_string(), cfg])).as_array().unwrap().iter().map(|x| x["signature"].as_str().unwrap().to_string()).collect()
 }
 
-fn indexer_matches_node(storage: &str) {
-    let r = run(&format!("history_ix_{storage}"), storage);
+#[test]
+fn indexer_matches_node() {
+    let (storage, r) = ("segments", run("history_ix"));
     let journal = r.cfg.node.data_dir.join("journal.bin");
     let check = |ix: &Indexer, what: &str| {
         for (s, expected) in &r.seen {
@@ -127,7 +128,7 @@ fn indexer_matches_node(storage: &str) {
     drop(ix);
     // Arresto a metà scrittura: coda dell'archivio troncata, poi riregistrata.
     let arch = r.cfg.indexer.as_ref().unwrap().data_dir.join("archive");
-    let last = std::fs::read_dir(&arch).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log" || x == "bin" || x == "redb")).max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
+    let last = std::fs::read_dir(&arch).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log")).max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
     let len = std::fs::metadata(&last).unwrap().len();
     std::fs::OpenOptions::new().write(true).open(&last).unwrap().set_len(len.saturating_sub(10)).unwrap();
     let ix = Indexer::open(&r.cfg, &journal).unwrap();
@@ -135,24 +136,8 @@ fn indexer_matches_node(storage: &str) {
 }
 
 #[test]
-fn indexer_segments_matches_node() {
-    indexer_matches_node("segments");
-}
-
-#[test]
-fn indexer_pages_matches_node() {
-    indexer_matches_node("pages");
-}
-
-#[cfg(feature = "redb-archive")]
-#[test]
-fn indexer_redb_matches_node() {
-    indexer_matches_node("redb");
-}
-
-#[test]
 fn retention_drops_old_segments_only() {
-    let mut r = run("history_retention", "segments");
+    let mut r = run("history_retention");
     r.cfg.indexer.as_mut().unwrap().retention_blocks = 10;
     let ix = Indexer::open(&r.cfg, &r.cfg.node.data_dir.join("journal.bin")).unwrap();
     // Con altezze < 1000 la conservazione non scatta da sola: si applica a mano.

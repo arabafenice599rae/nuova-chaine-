@@ -626,7 +626,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "litesvm",
- "redb",
  "rustls",
  "serde",
  "serde_json",
@@ -2357,15 +2356,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
 dependencies = [
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "redb"
-version = "4.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39178e0a867f9e3eaa6292a4ab1dd3613f2519c5b564341e1e7b29b270736cc4"
-dependencies = [
- "libc",
 ]
 
 [[package]]
