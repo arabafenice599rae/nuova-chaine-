@@ -292,6 +292,7 @@ centrifuga genesis [config]                 # costruisce e verifica il genesis
 centrifuga run [config]                     # nodo: blocchi, RPC, WebSocket, stream
 centrifuga balance <pubkey> [url_rpc]       # es. "12.5 CnFA" (simbolo da getVersion)
 centrifuga eligible <config> <lista> <out>  # aventi diritto al residuo del fee mining
+centrifuga wallet <new|address|balance|send|token-send|history>  # vedi docs/wallet.md
 ```
 
 ## CI
@@ -311,7 +312,8 @@ il `.so` committato (`scripts/check-timelock-hash.sh`).
 ## Struttura
 
 ```
-src/main.rs        CLI (genesis, run, balance, eligible)
+src/main.rs        CLI (genesis, run, balance, eligible, wallet)
+src/wallet.rs      wallet a riga di comando (verifica l'identità del nodo)
 deploy/            installazione devnet su VPS (systemd, HTTPS)
 src/stream/        stream WebSocket per bot e repliche, `Replica` che verifica tutto
 src/rpc/           gateway JSON-RPC + WebSocket per i wallet
