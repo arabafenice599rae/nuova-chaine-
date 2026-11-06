@@ -53,6 +53,8 @@ pub struct Stats {
     /// Durata dell'ultima scrittura (ms) e coda più lunga raccolta durante una scrittura.
     pub last_write_ms: AtomicU64,
     pub max_queue: AtomicU64,
+    /// Snapshot scritti: (altezza, ms unix di inizio e del rename). Solo misura.
+    pub windows: Mutex<Vec<(u64, u64, u64)>>,
     /// Primo errore (divergenza, scrittura): l'ombra non scrive più fino al riavvio.
     pub error: Mutex<Option<String>>,
 }
@@ -84,6 +86,7 @@ impl Shadow {
         rules: crate::exec::Rules,
         status: Vec<u8>,
         window: u64,
+        mb_s: u64,
     ) -> Result<Shadow, String> {
         let (tx, rx) = std::sync::mpsc::sync_channel(QUEUE_BLOCKS);
         let stats = Arc::new(Stats::default());
@@ -96,7 +99,7 @@ impl Shadow {
                     .decode(&status, height)
                     .map_err(|e| format!("status: {e}"))
                     .and_then(|()| Replica::from_state(height, state_hash, accounts, rules));
-                run(dir, rep, index, rx, st)
+                run(dir, rep, index, rx, st, mb_s)
             })
             .map_err(|e| format!("shadow thread: {e}"))?;
         Ok(Shadow { tx, lost: false, stats, handle: Some(handle) })
@@ -176,6 +179,8 @@ struct State {
     st: Arc<Stats>,
     slow: Duration,
     queue_limit: usize,
+    /// Banda massima della scrittura (MB/s, 0 = nessun limite).
+    mb_s: u64,
 }
 
 impl State {
@@ -217,14 +222,14 @@ impl State {
             self.rep = None;
             return;
         }
-        let started = std::time::Instant::now();
+        let (started, start_ms) = (std::time::Instant::now(), crate::node::now_ms());
         let mut queue: std::collections::VecDeque<Msg> = Default::default();
         let mut blocks = 0usize;
         let status = self.index.encode(height);
         let tmp = self.dir.join("snapshot.tmp");
         let result = (|| -> Result<bool, String> {
             let e = |e: std::io::Error| format!("snapshot {height}: {e}");
-            let mut w = crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?;
+            let mut w = crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?.with_rate(self.mb_s);
             let mut lt = crate::exec::state_hash::LtState::empty();
             for (i, (k, a)) in r.accounts().iter().enumerate() {
                 w.push(k, a).map_err(e)?;
@@ -263,6 +268,7 @@ impl State {
             Ok(true) => {
                 self.st.written.fetch_add(1, Ordering::Relaxed);
                 self.st.last_write_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                self.st.windows.lock().unwrap().push((height, start_ms, crate::node::now_ms()));
             }
             Ok(false) => {
                 let _ = std::fs::remove_file(&tmp);
@@ -280,7 +286,7 @@ impl State {
     }
 }
 
-fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>) {
+fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>, mb_s: u64) {
     lower_priority();
     let rep = match rep {
         Ok(r) => Some(r),
@@ -289,7 +295,7 @@ fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<
             None
         }
     };
-    let mut state = State { dir, rep, index, st, slow: Duration::ZERO, queue_limit: QUEUE_BLOCKS };
+    let mut state = State { dir, rep, index, st, slow: Duration::ZERO, queue_limit: QUEUE_BLOCKS, mb_s };
     while let Ok(m) = rx.recv() {
         state.handle(m, &rx);
     }

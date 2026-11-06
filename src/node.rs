@@ -38,8 +38,10 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
-    /// (altezza, µs di sync_data del journal) di ogni blocco: solo misura.
-    pub sync_log: Vec<(u64, u32)>,
+    /// (altezza, ms unix, µs di sync_data del journal) di ogni blocco: solo misura.
+    pub sync_log: Vec<(u64, u64, u32)>,
+    /// Snapshot scritti: (altezza, ms unix di inizio e di fine, cioè del rename). Solo misura.
+    pub snapshot_log: Vec<(u64, u64, u64)>,
     /// Pausa dell'ultimo snapshot nel suo tick (µs: codifica degli stati e invio allo
     /// stato ombra; copia e scrittura sono su altri thread): solo misura.
     pub last_snapshot_us: u64,
@@ -96,7 +98,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, sync_log: vec![], last_snapshot_us: 0, shadow: None, slow_blocks: vec![], shadow_at: 0, last_delta: None, journal, dir, keypair };
+        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, sync_log: vec![], snapshot_log: vec![], last_snapshot_us: 0, shadow: None, slow_blocks: vec![], shadow_at: 0, last_delta: None, journal, dir, keypair };
         if n.cfg.node.snapshot_every > 0 {
             n.start_shadow()?;
         }
@@ -121,7 +123,7 @@ impl Node {
         let t = Instant::now();
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
         if self.sync_log.len() < 1_000_000 {
-            self.sync_log.push((ex.block.header.height, self.journal.last_sync.as_micros() as u32));
+            self.sync_log.push((ex.block.header.height, crate::node::now_ms(), self.journal.last_sync.as_micros() as u32));
         }
         ex.phases.journal = t.elapsed();
         let arrivals = &mut self.arrivals;
@@ -200,7 +202,8 @@ impl Node {
         let accounts = c.svm.accounts().clone();
         let status = self.index.encode(c.height);
         let window = c.params.blockhash_window as u64;
-        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules, status, window)?);
+        let mb_s = self.cfg.node.snapshot_mb_s;
+        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules, status, window, mb_s)?);
         self.shadow_at = c.height;
         Ok(())
     }
@@ -235,6 +238,11 @@ impl Node {
     pub fn snapshot_counts(&self) -> (u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;
         self.shadow.as_ref().map_or((0, 0), |s| (s.stats.skipped.load(Relaxed), s.stats.written.load(Relaxed)))
+    }
+
+    /// Snapshot scritti dall'ombra: (altezza, ms unix di inizio e del rename). Solo misura.
+    pub fn snapshot_windows(&self) -> Vec<(u64, u64, u64)> {
+        self.shadow.as_ref().map_or(vec![], |s| s.stats.windows.lock().unwrap().clone())
     }
 
     /// Durata dell'ultima scrittura (ms) e coda più lunga (blocchi) durante una scrittura.

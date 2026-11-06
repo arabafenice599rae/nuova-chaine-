@@ -243,8 +243,13 @@ fn main() {
     let (mut cpu_last, mut cpu_total) = (cpu_ticks(), [0u64; 4]);
     // Snapshot: (altezza, RSS subito prima, istante + 60 s); poi la riga con il RSS dopo 1 minuto.
     let (mut rss_last, mut snap_rss, mut snap_lines) = (rss_mb(), Vec::<(u64, u64, Instant)>::new(), Vec::<(u64, u64, u64)>::new());
+    let dirty_samples: Mutex<Vec<(u64, u64)>> = Mutex::new(vec![]);
     while t0.elapsed() < Duration::from_secs(minutes * 60) {
         std::thread::sleep(Duration::from_millis(40));
+        // Dirty di /proc/meminfo (kB) a ogni giro, per il picco durante le scritture.
+        if let Some(kb) = std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("Dirty:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok())) {
+            dirty_samples.lock().unwrap().push((node::now_ms(), kb));
+        }
         let (h, us, inc, lh, snap_us) =
             rt.block_on(gw.query(|n: &mut Node| (n.chain.height, n.last_tick_us, n.index.count, n.chain.last_hash, n.last_snapshot_us))).unwrap();
         if h != last_h {
@@ -365,17 +370,37 @@ fn main() {
     say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
     say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
-    // sync_data del journal per blocco: nei 600 blocchi (60 s) da ogni altezza di snapshot e nel resto.
-    let sync_log = rt.block_on(gw.query(|n: &mut Node| n.sync_log.clone())).unwrap();
+    // sync_data del journal: nella finestra reale di ogni snapshot (dall'inizio al rename),
+    // nella finestra fissa di 600 blocchi dall'altezza dello snapshot, e nel resto.
+    let (sync_log, windows) = rt.block_on(gw.query(|n: &mut Node| (n.sync_log.clone(), n.snapshot_windows()))).unwrap();
+    let dirty = dirty_samples.lock().unwrap().clone();
     let every_s = cfg.node.snapshot_every;
-    let (mut during, mut rest): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
-    for (h, us) in &sync_log {
-        if every_s > 0 && *h >= every_s && h % every_s < 600 { during.push(*us as f64 / 1e3) } else { rest.push(*us as f64 / 1e3) }
+    say!("");
+    say!("| snapshot (altezza) | durata s | picco Dirty MB | blocchi nella finestra | sync_data p99 / max ms |");
+    say!("|---|---|---|---|---|");
+    let (mut real, mut fixed, mut rest): (Vec<f64>, Vec<f64>, Vec<f64>) = (vec![], vec![], vec![]);
+    for (h, t0, t1) in &windows {
+        let mut w: Vec<f64> = sync_log.iter().filter(|(_, t, _)| t >= t0 && t <= t1).map(|x| x.2 as f64 / 1e3).collect();
+        let peak = dirty.iter().filter(|(t, _)| t >= t0 && t <= t1).map(|x| x.1).max().unwrap_or(0);
+        say!("| {h} | {:.1} | {} | {} | {:.1} / {:.1} |", (t1 - t0) as f64 / 1e3, peak / 1024, w.len(), pct(&mut w, 0.99), pct(&mut w, 1.0));
+        real.append(&mut w);
     }
+    for (h, t, us) in &sync_log {
+        let ms = *us as f64 / 1e3;
+        if windows.iter().any(|(_, t0, t1)| t >= t0 && t <= t1) {
+            continue;
+        }
+        if every_s > 0 && *h >= every_s && h % every_s < 600 { fixed.push(ms) } else { rest.push(ms) }
+    }
+    let mut fixed_all = fixed.clone();
+    fixed_all.extend(real.iter().copied());
+    say!("");
     say!(
-        "sync_data del journal: durante gli snapshot ({} blocchi) p50 {:.2} / p99 {:.1} / max {:.1} ms; resto ({} blocchi) p50 {:.2} / p99 {:.1} / max {:.1} ms",
-        during.len(), pct(&mut during, 0.5), pct(&mut during, 0.99), pct(&mut during, 1.0),
-        rest.len(), pct(&mut rest, 0.5), pct(&mut rest, 0.99), pct(&mut rest, 1.0)
+        "sync_data del journal: finestra reale degli snapshot ({} blocchi) p99 {:.1} / max {:.1} ms; finestra fissa di 600 blocchi ({} blocchi) p99 {:.1} / max {:.1} ms; resto ({} blocchi) p99 {:.1} / max {:.1} ms; picco Dirty in tutta la prova {} MB",
+        real.len(), pct(&mut real, 0.99), pct(&mut real, 1.0),
+        fixed_all.len(), pct(&mut fixed_all, 0.99), pct(&mut fixed_all, 1.0),
+        rest.len(), pct(&mut rest, 0.99), pct(&mut rest, 1.0),
+        dirty.iter().map(|x| x.1).max().unwrap_or(0) / 1024
     );
     say!(
         "invio→inclusione ({} campioni, 1 ogni ~1000 tx, risoluzione ~40 ms): p50 {:.0} / p95 {:.0} / p99 {:.0} / max {:.0} ms",

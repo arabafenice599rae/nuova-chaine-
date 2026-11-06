@@ -124,23 +124,41 @@ pub fn write_snapshot_file<'a>(
     w.finish()
 }
 
+/// Blocchi di scrittura dello snapshot: mai più di ~2 blocchi in sospeso nella cache del
+/// disco, così il sync_data del journal non aspetta GB di scritture dello snapshot.
+const SNAP_CHUNK: u64 = 8 << 20;
+
 /// Scrittura di uno snapshot un account alla volta, in ordine di indirizzo (lo stato
-/// ombra la interrompe per raccogliere i delta che arrivano nel frattempo).
-pub struct SnapshotWriter(BufWriter<File>);
+/// ombra la interrompe per raccogliere i delta che arrivano nel frattempo). Ogni 8 MB:
+/// sync_file_range del blocco appena scritto (avvio) e attesa del precedente; con
+/// `with_rate`, una pausa per non superare i MB/s indicati.
+pub struct SnapshotWriter {
+    w: BufWriter<File>,
+    pos: u64,
+    synced: u64,
+    mb_s: u64,
+    started: std::time::Instant,
+}
 
 impl SnapshotWriter {
     pub fn create(path: &Path, height: u64, genesis_hash: Hash, state_hash: Hash, count: u64) -> io::Result<SnapshotWriter> {
-        let mut w = BufWriter::new(File::create(path)?);
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(path)?);
         w.write_all(SNAP_MAGIC)?;
         w.write_all(&height.to_le_bytes())?;
         w.write_all(genesis_hash.as_ref())?;
         w.write_all(state_hash.as_ref())?;
         w.write_all(&count.to_le_bytes())?;
-        Ok(SnapshotWriter(w))
+        Ok(SnapshotWriter { w, pos: 88, synced: 0, mb_s: 0, started: std::time::Instant::now() })
+    }
+
+    /// Limite di banda della scrittura (0 = nessuno).
+    pub fn with_rate(mut self, mb_s: u64) -> SnapshotWriter {
+        self.mb_s = mb_s;
+        self
     }
 
     pub fn push(&mut self, k: &Address, a: &AccountSharedData) -> io::Result<()> {
-        let w = &mut self.0;
+        let w = &mut self.w;
         w.write_all(k.as_ref())?;
         w.write_all(&a.lamports().to_le_bytes())?;
         w.write_all(a.owner().as_ref())?;
@@ -148,12 +166,40 @@ impl SnapshotWriter {
         w.write_all(&a.rent_epoch().to_le_bytes())?;
         w.write_all(&(a.data().len() as u64).to_le_bytes())?;
         w.write_all(a.data())?;
+        self.pos += 89 + a.data().len() as u64;
+        if self.pos - self.synced >= SNAP_CHUNK {
+            self.chunk()?;
+        }
+        Ok(())
+    }
+
+    fn chunk(&mut self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        self.w.flush()?;
+        let fd = self.w.get_ref().as_raw_fd();
+        let (start, len) = (self.synced as i64, (self.pos - self.synced) as i64);
+        // SAFETY: solo hint di scrittura sul file aperto; nessuna memoria coinvolta.
+        unsafe {
+            libc::sync_file_range(fd, start, len, libc::SYNC_FILE_RANGE_WRITE);
+            if start > 0 {
+                // Tutto ciò che precede il blocco appena avviato: già quasi tutto su disco.
+                let flags = libc::SYNC_FILE_RANGE_WAIT_BEFORE | libc::SYNC_FILE_RANGE_WRITE | libc::SYNC_FILE_RANGE_WAIT_AFTER;
+                libc::sync_file_range(fd, 0, start, flags);
+            }
+        }
+        self.synced = self.pos;
+        if self.mb_s > 0 {
+            let due = std::time::Duration::from_secs_f64(self.pos as f64 / (self.mb_s as f64 * 1e6));
+            if let Some(wait) = due.checked_sub(self.started.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
         Ok(())
     }
 
     /// Flush e fsync.
     pub fn finish(self) -> io::Result<()> {
-        self.0.into_inner().map_err(|e| e.into_error())?.sync_all()
+        self.w.into_inner().map_err(|e| e.into_error())?.sync_all()
     }
 }
 

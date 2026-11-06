@@ -81,6 +81,9 @@ pub struct NodeConfig {
     /// Limite in byte della stessa finestra (indirizzi degli account cambiati in RAM).
     #[serde(default = "default_stream_catchup_bytes")]
     pub stream_catchup_bytes: usize,
+    /// Banda massima della scrittura dello snapshot (MB/s, 0 = nessun limite).
+    #[serde(default = "default_snapshot_mb_s")]
+    pub snapshot_mb_s: u64,
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
@@ -299,6 +302,10 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn default_snapshot_mb_s() -> u64 {
+    100
 }
 
 fn default_stream_catchup_bytes() -> usize {
