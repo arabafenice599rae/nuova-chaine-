@@ -73,6 +73,7 @@ fn background_snapshot_is_the_exact_state_of_its_height() {
     ledger::write_snapshot(&dc, cc.height, cc.genesis_hash, cc.state_hash(), cc.svm.accounts().iter()).unwrap();
     assert_eq!(std::fs::read(da.join("snapshot.bin")).unwrap(), std::fs::read(dc.join("snapshot.bin")).unwrap(), "stesso file dello snapshot sincrono");
     assert_eq!(s.state_hash, cc.state_hash(), "nell'header l'hash di stato della sua altezza");
+    assert_eq!(std::fs::read(da.join("status.bin")).unwrap(), c.index.encode(20), "stati della finestra uguali a quelli del nodo al 20");
     assert_ne!(s.state_hash, a.chain.state_hash(), "i blocchi dopo il 20 non entrano nello snapshot");
 }
 

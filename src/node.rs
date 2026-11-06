@@ -130,7 +130,8 @@ impl Node {
         let delta = Arc::new(crate::stream::block_delta(self, &ex));
         self.last_delta = Some((ex.block.header.height, delta.clone()));
         if let Some(s) = self.shadow.as_mut() {
-            s.send(crate::shadow::Msg::Block { height: ex.block.header.height, state_hash: ex.block.header.state_hash, delta });
+            let statuses = TxIndex::statuses_of(&ex);
+            s.send(crate::shadow::Msg::Block { height: ex.block.header.height, state_hash: ex.block.header.state_hash, delta, statuses });
             self.shadow_at = ex.block.header.height;
         }
         let every = self.cfg.node.snapshot_every;
@@ -187,29 +188,30 @@ impl Node {
         self.shadow = None; // il precedente finisce la scrittura in corso
         let c = &self.chain;
         let accounts = c.svm.accounts().clone();
-        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules)?);
+        let status = self.index.encode(c.height);
+        let window = c.params.blockhash_window as u64;
+        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules, status, window)?);
         self.shadow_at = c.height;
         Ok(())
     }
 
-    /// Snapshot all'altezza corrente, scritto in background dallo stato ombra: sul thread
-    /// del nodo restano la codifica degli stati della finestra e un invio non bloccante.
+    /// Snapshot all'altezza corrente, scritto in background dallo stato ombra (account e
+    /// stati della finestra): sul thread del nodo resta un invio non bloccante.
     /// Se lo scrittore è occupato o l'ombra è persa, lo snapshot si salta (contato). Il
     /// file vale solo dopo il rename: un arresto a metà lascia valido il precedente.
     /// Senza ombra (`snapshot_every = 0`) lo snapshot si scrive qui, in modo sincrono.
     pub fn snapshot(&mut self) -> Result<(), String> {
         let c = &self.chain;
         let (height, gh, sh) = (c.height, c.genesis_hash, c.state_hash());
-        let status = self.index.encode(height);
         if self.shadow.is_none() {
             let accounts = c.svm.accounts().iter().map(|(k, a)| (*k, a.clone())).collect();
-            return write_snapshot_and_status(&self.dir, height, gh, sh, accounts, &status);
+            return write_snapshot_and_status(&self.dir, height, gh, sh, accounts, &self.index.encode(height));
         }
         if self.shadow_at != height {
             self.start_shadow()?;
         }
         let shadow = self.shadow.as_mut().unwrap();
-        shadow.send(crate::shadow::Msg::Snapshot { height, genesis_hash: gh, state_hash: sh, status });
+        shadow.send(crate::shadow::Msg::Snapshot { height, genesis_hash: gh, state_hash: sh });
         Ok(())
     }
 

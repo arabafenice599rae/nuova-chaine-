@@ -15,14 +15,19 @@ use std::time::Duration;
 
 use solana_hash::Hash;
 
+use solana_signature::Signature;
+use solana_transaction::TransactionError;
+
+use crate::rpc::index::TxIndex;
 use crate::stream::{Accounts, Replica};
 
 /// Blocchi in coda al massimo verso il thread dell'ombra (~60 s a 100 ms per blocco).
 pub const QUEUE_BLOCKS: usize = 600;
 
 pub enum Msg {
-    Block { height: u64, state_hash: Hash, delta: Arc<Accounts> },
-    Snapshot { height: u64, genesis_hash: Hash, state_hash: Hash, status: Vec<u8> },
+    /// Delta del blocco e stati delle sue tx (firma, errore).
+    Block { height: u64, state_hash: Hash, delta: Arc<Accounts>, statuses: Vec<(Signature, Option<TransactionError>)> },
+    Snapshot { height: u64, genesis_hash: Hash, state_hash: Hash },
     /// Attende la fine della scrittura in corso e risponde.
     Barrier(SyncSender<()>),
     /// Solo test: rallenta il thread / simula una divergenza.
@@ -57,20 +62,31 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    /// `accounts`: stato del nodo a `height` (copiato una volta, all'avvio).
+    /// `accounts` e `status` (contenuto di `status.bin`): stato del nodo a `height`,
+    /// copiato una volta, all'avvio. `window`: blocchi della finestra degli stati.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         dir: PathBuf,
         height: u64,
         state_hash: Hash,
         accounts: std::collections::HashMap<solana_address::Address, solana_account::AccountSharedData>,
         rules: crate::exec::Rules,
+        status: Vec<u8>,
+        window: u64,
     ) -> Result<Shadow, String> {
         let (tx, rx) = std::sync::mpsc::sync_channel(QUEUE_BLOCKS);
         let stats = Arc::new(Stats::default());
         let st = stats.clone();
         let handle = std::thread::Builder::new()
             .name("centrifuga-shadow".into())
-            .spawn(move || run(dir, Replica::from_state(height, state_hash, accounts, rules), rx, st))
+            .spawn(move || {
+                let mut index = TxIndex::new(window, 0, 0);
+                let rep = index
+                    .decode(&status, height)
+                    .map_err(|e| format!("status: {e}"))
+                    .and_then(|()| Replica::from_state(height, state_hash, accounts, rules));
+                run(dir, rep, index, rx, st)
+            })
             .map_err(|e| format!("shadow thread: {e}"))?;
         Ok(Shadow { tx, lost: false, stats, handle: Some(handle) })
     }
@@ -131,7 +147,7 @@ impl Drop for Shadow {
     }
 }
 
-fn run(dir: PathBuf, rep: Result<Replica, String>, rx: Receiver<Msg>, st: Arc<Stats>) {
+fn run(dir: PathBuf, rep: Result<Replica, String>, mut index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>) {
     let mut rep = match rep {
         Ok(r) => Some(r),
         Err(e) => {
@@ -153,7 +169,8 @@ fn run(dir: PathBuf, rep: Result<Replica, String>, rx: Receiver<Msg>, st: Arc<St
     };
     for m in rx {
         match m {
-            Msg::Block { height, state_hash, delta } => {
+            Msg::Block { height, state_hash, delta, statuses } => {
+                index.record_statuses(height, statuses);
                 if let Some(r) = rep.as_mut() {
                     if let Err(e) = r.apply_delta(height, state_hash, &delta) {
                         st.fail(format!("shadow state diverged at {height}: {e}"));
@@ -161,7 +178,7 @@ fn run(dir: PathBuf, rep: Result<Replica, String>, rx: Receiver<Msg>, st: Arc<St
                     }
                 }
             }
-            Msg::Snapshot { height, genesis_hash, state_hash, status } => {
+            Msg::Snapshot { height, genesis_hash, state_hash } => {
                 let Some(r) = rep.as_ref() else {
                     st.skipped.fetch_add(1, Ordering::Relaxed);
                     continue;
@@ -178,6 +195,7 @@ fn run(dir: PathBuf, rep: Result<Replica, String>, rx: Receiver<Msg>, st: Arc<St
                     continue;
                 }
                 let copy = r.accounts().clone();
+                let status = index.encode(height);
                 let dir = dir.clone();
                 let spawned = std::thread::Builder::new().name("centrifuga-snapshot".into()).spawn(move || {
                     // Prima di scrivere: LtHash completo della copia = hash di stato del nodo.
