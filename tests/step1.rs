@@ -53,9 +53,88 @@ fn genesis_conservation_and_programs() {
     let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
     assert_eq!(c.svm.lamports(&genesis::vault_address("airdrop")) - rent, 20_000_000 * LAMPORTS_PER_CNFA);
     assert_eq!(c.svm.lamports(&genesis::vault_address("mining")) - rent, 30_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("operator")) - rent, 5_000_000 * LAMPORTS_PER_CNFA);
+    // Riserva: 45M meno gli account di sistema (e il prefund di questo test su devnet).
+    assert_eq!(s.reserve_lamports, 45_000_000 * LAMPORTS_PER_CNFA - s.system_lamports - 10 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("reserve")) - rent, s.reserve_lamports);
+    // Programmi eseguibili nel genesis: solo questi (nessun programma di scambio o vendita).
+    let mut exec: Vec<String> = c.svm.accounts().iter().filter(|(_, a)| a.executable()).map(|(k, _)| k.to_string()).collect();
+    exec.sort();
+    let mut allowed: Vec<String> = progs.iter().map(|p| p.to_string()).collect();
+    allowed.extend([
+        genesis::timelock_program_id().to_string(),
+        // Caricati di default da litesvm (nessuno scambia o vende token).
+        "AddressLookupTab1e1111111111111111111111111".into(),
+        "Stake11111111111111111111111111111111111111".into(),
+        "Vote111111111111111111111111111111111111111".into(),
+        "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo".into(),
+        "Secp256r1SigVerify1111111111111111111111111".into(),
+        "ZkE1Gama1Proof11111111111111111111111111111".into(),
+    ]);
+    allowed.sort();
+    let extra: Vec<_> = exec.iter().filter(|p| !allowed.contains(p) && !p.starts_with("BPFLoader") && !p.starts_with("NativeLoader")).collect();
+    assert!(extra.is_empty(), "programmi non previsti nel genesis: {extra:?}");
     // Determinismo: due costruzioni, stesso hash.
     assert_eq!(chain(&cfg).genesis_hash, c.genesis_hash);
     genesis::check_determinism(&cfg.genesis, 5).unwrap();
+}
+
+fn mainnet(cfg: &Config) -> genesis::GenesisConfig {
+    let mut g = cfg.genesis.clone();
+    g.network = "mainnet".into();
+    g.chain_id = "centrifuga:mainnet".into();
+    g.prefund.clear();
+    g
+}
+
+#[test]
+fn mainnet_allocation_is_fixed() {
+    let (op, payer) = (Keypair::new(), Keypair::new());
+    let base = mainnet(&config("alloc-main", &op, &payer));
+    let (c, s) = genesis::build(&base).unwrap();
+    let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
+    let vault = |n: &str| c.svm.lamports(&genesis::vault_address(n)) - rent;
+    assert_eq!(vault("airdrop"), 20_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(vault("mining"), 30_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(vault("operator"), 5_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(vault("reserve") + s.system_lamports, 45_000_000 * LAMPORTS_PER_CNFA, "riserva = 45M - account di sistema");
+    assert_eq!(c.total_lamports(), SUPPLY_LAMPORTS as u128);
+    // Ogni importo diverso da 20M / 30M / 5M è rifiutato.
+    let changes: [fn(&mut genesis::GenesisConfig); 4] = [
+        |g| g.operator_cnfa = 20_000_000,
+        |g| g.operator_cnfa = 4_999_999,
+        |g| g.airdrop_cnfa += 1,
+        |g| g.mining_cnfa -= 1,
+    ];
+    for f in changes {
+        let mut g = base.clone();
+        f(&mut g);
+        let e = genesis::build(&g).err().expect("allocazione diversa rifiutata su mainnet");
+        assert!(e.contains("mainnet allocation"), "{e}");
+    }
+    // Sblocco dell'operatore: 48 mesi esatti.
+    let mut g = base.clone();
+    g.operator_unlock_blocks -= 1;
+    assert!(genesis::build(&g).err().unwrap().contains("48 months"));
+}
+
+#[test]
+fn devnet_allocation_is_configurable_but_conserved() {
+    let (op, payer) = (Keypair::new(), Keypair::new());
+    let mut g = config("alloc-dev", &op, &payer).genesis;
+    // Importi e sblocco diversi da mainnet: accettati, e la somma resta 100M esatti.
+    g.airdrop_cnfa = 1_000_000;
+    g.mining_cnfa = 2_000_000;
+    g.operator_cnfa = 20_000_000;
+    g.operator_unlock_blocks = 100;
+    let (c, s) = genesis::build(&g).unwrap();
+    let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("operator")) - rent, 20_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(s.reserve_lamports, 77_000_000 * LAMPORTS_PER_CNFA - s.system_lamports - 10 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.total_lamports(), SUPPLY_LAMPORTS as u128);
+    // Oltre la supply: rifiutato dal controllo di conservazione.
+    g.operator_cnfa = 98_000_000;
+    assert!(genesis::build(&g).err().unwrap().contains("exceed the supply"));
 }
 
 #[test]
