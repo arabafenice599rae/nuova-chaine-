@@ -28,3 +28,10 @@ journal 658 MB = 219 byte/tx, 3945 MB/ora; snapshot 91 MB; status.bin 11.4 MB
 stati: 10 trovati e 10 scaduti come atteso (errori 0 / 0); wallet sotto carico: 2 ok, 0 errori
 snapshot durante il carico: 2 (scrittura dello snapshot nel suo blocco: 781 ms, 876 ms), massimo 876 ms
 riavvio da snapshot (altezza 6000) + journal: 6.4 s, altezza 6013, hash uguali
+riesecuzione completa: stato iniziale 1.3 s, journal 111.0 s (altezza 6013)
+  preparazione (fino all'altezza 1): 1 blocchi, 0 tx, 0.0 s, 0.1 ms/blocco
+  carico: 5993 blocchi, 3002502 tx, 109.2 s, 18.2 ms/blocco
+  tx incluse ma fallite (eseguite con errore, contate rieseguendo il journal): 0
+  blocchi vuoti dopo l'inizio del carico (battito, coda): 0 blocchi, 0 tx, 0.0 s, 0.0 ms/blocco
+  hash finale (blocco, stato incrementale, stato ricalcolato) uguali al nodo vivo
+FINE
