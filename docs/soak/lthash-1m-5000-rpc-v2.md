@@ -48,3 +48,19 @@ journal 1974 MB = 219 byte/tx, 3945 MB/ora; snapshot 91 MB; status.bin 11.4 MB
 stati: 30 trovati e 30 scaduti come atteso (errori 0 / 0); wallet sotto carico: 6 ok, 0 errori
 snapshot durante il carico: 1 (blocchi con snapshot: 841 ms), pausa massima 841 ms
 riavvio da snapshot (altezza 18000) + journal: 15.1 s, altezza 18013, hash uguali
+riesecuzione completa: stato iniziale 1.3 s, journal 336.7 s (altezza 18013)
+  preparazione (fino all'altezza 1): 1 blocchi, 0 tx, 0.0 s, 0.1 ms/blocco
+  carico: 17948 blocchi, 8999206 tx, 331.0 s, 18.4 ms/blocco
+  tx incluse ma fallite (eseguite con errore, contate rieseguendo il journal): 0
+  blocchi vuoti dopo l'inizio del carico (battito, coda): 0 blocchi, 0 tx, 0.0 s, 0.0 ms/blocco
+  hash finale (blocco, stato incrementale, stato ricalcolato) uguali al nodo vivo
+FINE
+
+## RSS intorno agli snapshot da campionamento esterno
+
+Il binario di questo run riconosceva uno snapshot solo vedendo esattamente l'altezza multipla di 3000; sotto carico RPC li ha persi quasi tutti (corretto in 6cdf6cf). Dal minuto 11 un campionatore esterno ha registrato ogni secondo altezza (getSlot) e RSS del processo:
+
+- snapshot 9000: RSS subito prima 865 MB, 60 s dopo 865 MB
+- snapshot 12000: RSS subito prima 866 MB, 60 s dopo 866 MB
+- snapshot 15000: RSS subito prima 866 MB, 60 s dopo 867 MB
+- snapshot 18000: RSS subito prima 868 MB, 60 s dopo n/d (carico finito prima dei 60 s)
