@@ -18,6 +18,10 @@ mainnet c'è una sezione apposta, da eseguire una sola volta.
    scripts/third-party-notices.py > THIRD_PARTY_NOTICES
    ```
 3. **Verifiche**: `cargo build --release --locked` e `cargo test --release --locked`.
+   A ogni aggiornamento di litesvm è obbligatorio che passi
+   `cargo test --release --locked --test step1 vote_and_stake_programs_are_absent`:
+   litesvm carica Vote e Stake di default e il nodo li chiude (anche dopo un riavvio da
+   snapshot); se una nuova versione li registra in un altro modo, il test lo rileva.
    La CI (build, test, web3.js, hash del timelock, deploy dietro Caddy con il
    wallet) deve essere verde sul commit della release.
 4. **Timelock**: lo SHA-256 di `programs/timelock/centrifuga_timelock.so` deve

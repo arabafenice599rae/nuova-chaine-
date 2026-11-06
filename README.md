@@ -85,7 +85,7 @@ centrifuga run centrifuga.toml
 
 `centrifuga genesis` costruisce lo stato iniziale e verifica:
 1. **conservazione**: somma di tutti i lamport, account di sistema inclusi
-   (6,481638061 CnFA di sysvar, builtin, feature, programmi e vault), = 100.000.000 CnFA esatti;
+   (5,4523437 CnFA di sysvar, builtin, feature, programmi e vault), = 100.000.000 CnFA esatti;
 2. **determinismo**: costruisce due volte, produce 20 blocchi di test su una copia,
    li riesegue sull'altra e confronta gli hash.
 
@@ -195,8 +195,15 @@ Hash della lista: *da pubblicare a fine fee mining* (blocco 630.720.000).
 
 Programmi nel genesis: System, SPL Token, Token-2022, Associated Token Account,
 Compute Budget, Memo, precompile ed25519/secp256k1 (più quelli che litesvm carica
-di default: Address Lookup Table, Stake, Vote, Memo v1, precompile secp256r1, ZK ElGamal
-proof). L'elenco è chiuso: un test fallisce se nel genesis compare un altro programma..
+di default: Address Lookup Table, Memo v1, precompile secp256r1, ZK ElGamal proof).
+L'elenco è chiuso: un test fallisce se nel genesis compare un altro programma.
+**Vote e Stake non ci sono**: litesvm li carica di default, il genesis li chiude con l'API
+pubblica (account vuoto: programma chiuso e account cancellato) e il nodo li richiude dopo
+ogni riavvio da snapshot. Non c'è consenso a stake né ricompense; una tx che li invoca
+fallisce (test `vote_and_stake_programs_are_absent`). Restano due account creati da
+litesvm con le sysvar, **dati inerti senza programma**: la configurazione di Stake
+(`StakeConfig11111111111111111111111111111111`) e la sysvar StakeHistory, vuota. Nessun
+programma li legge o li modifica, e non hanno effetti su fee, ricompense o consenso..
 
 ## Deploy di programmi
 

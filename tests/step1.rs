@@ -65,8 +65,6 @@ fn genesis_conservation_and_programs() {
         genesis::timelock_program_id().to_string(),
         // Caricati di default da litesvm (nessuno scambia o vende token).
         "AddressLookupTab1e1111111111111111111111111".into(),
-        "Stake11111111111111111111111111111111111111".into(),
-        "Vote111111111111111111111111111111111111111".into(),
         "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo".into(),
         "Secp256r1SigVerify1111111111111111111111111".into(),
         "ZkE1Gama1Proof11111111111111111111111111111".into(),
@@ -135,6 +133,44 @@ fn devnet_allocation_is_configurable_but_conserved() {
     // Oltre la supply: rifiutato dal controllo di conservazione.
     g.operator_cnfa = 98_000_000;
     assert!(genesis::build(&g).err().unwrap().contains("exceed the supply"));
+}
+
+/// Vote e Stake non ci sono: né nel genesis, né dopo un riavvio da snapshot, e una tx che
+/// li invoca fallisce.
+#[test]
+fn vote_and_stake_programs_are_absent() {
+    use centrifuga::exec::litesvm_internal::unused_programs;
+    let (op, payer) = (Keypair::new(), Keypair::new());
+    let mut cfg = config("no_vote_stake", &op, &payer);
+    cfg.node.snapshot_every = 2;
+    for k in unused_programs() {
+        let c = chain(&cfg);
+        assert!(c.svm.get(&k).is_none(), "{k} nel genesis");
+    }
+    let t0 = cfg.genesis.timestamp_ms;
+    let key = || Keypair::try_from(op.to_bytes().as_slice()).unwrap();
+    let mut n = Node::open(cfg.clone(), key()).unwrap();
+    // Una tx che invoca il programma: rifiutata (non inclusa) o inclusa con errore.
+    let call = |n: &mut Node, program: Address, i: u64| {
+        let ix = solana_instruction::Instruction { program_id: program, accounts: vec![], data: vec![0, 0, 0, 0] };
+        let msg = solana_message::Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &n.chain.last_hash);
+        let tx = solana_transaction::versioned::VersionedTransaction::try_new(solana_message::VersionedMessage::Legacy(msg), &[&payer]).unwrap();
+        n.ingress.submit(None, vec![tx]);
+        let ex = n.tick(t0 + i * 100).unwrap();
+        ex.results.first().map(|r| r.is_err())
+    };
+    let (vote, stake) = (unused_programs()[0], unused_programs()[1]);
+    for (i, p) in [vote, stake].into_iter().enumerate() {
+        assert_ne!(call(&mut n, p, i as u64 + 1), Some(false), "{p}: invocazione riuscita");
+    }
+    // snapshot_every = 2: lo snapshot del blocco 2 c'è; riavvio da snapshot + journal.
+    drop(n);
+    let n = Node::open(cfg, key()).unwrap();
+    assert!(centrifuga::ledger::read_snapshot(&n.cfg.node.data_dir).unwrap().is_some_and(|s| s.height == 2));
+    for k in unused_programs() {
+        assert!(n.chain.svm.get(&k).is_none(), "{k} dopo il riavvio da snapshot");
+    }
+    assert_eq!(n.chain.state_hash(), n.chain.full_state_hash());
 }
 
 #[test]
