@@ -356,7 +356,7 @@ fn main() {
     }
     std::thread::sleep(Duration::from_millis(300));
     let (h, lh, sh, inc, stl, skipped) = rt
-        .block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), n.snapshots_skipped)))
+        .block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), n.snapshot_counts().0)))
         .unwrap();
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
     let hours = t0.elapsed().as_secs_f64() / 3600.0;
@@ -390,7 +390,7 @@ fn main() {
     say!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
     say!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
     say!(
-        "snapshot durante il carico: {} (pausa nel blocco: copia della mappa e degli stati; la scrittura è in background: {}), massimo {:.0} ms",
+        "snapshot durante il carico: {} (pausa sul thread del nodo: codifica degli stati e invio allo stato ombra; copia e scrittura sono in background: {}), massimo {:.0} ms",
         snap_pauses.len(),
         snap_pauses.iter().map(|p| format!("{p:.0} ms")).collect::<Vec<_>>().join(", "),
         snap_pauses.iter().cloned().fold(0.0, f64::max)

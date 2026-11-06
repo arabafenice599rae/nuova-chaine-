@@ -38,13 +38,15 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
-    /// Pausa dell'ultimo snapshot nel suo tick (µs: copia della mappa e degli stati; la
-    /// scrittura è su un altro thread): solo misura.
+    /// Pausa dell'ultimo snapshot nel suo tick (µs: codifica degli stati e invio allo
+    /// stato ombra; copia e scrittura sono su altri thread): solo misura.
     pub last_snapshot_us: u64,
-    /// Snapshot saltati perché il precedente era ancora in scrittura.
-    pub snapshots_skipped: u64,
-    /// Scrittura in background dello snapshot in corso (o finita e non ancora raccolta).
-    snap_job: Option<std::thread::JoinHandle<Result<(), String>>>,
+    /// Stato ombra per lo snapshot in background (None con `snapshot_every = 0`).
+    shadow: Option<crate::shadow::Shadow>,
+    /// Altezza dell'ultimo delta mandato all'ombra.
+    shadow_at: u64,
+    /// Delta dell'ultimo blocco (lo stesso per lo stream e per l'ombra).
+    pub last_delta: Option<(u64, Arc<crate::stream::Accounts>)>,
     journal: Journal,
     dir: PathBuf,
     keypair: Keypair,
@@ -90,7 +92,11 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, snapshots_skipped: 0, snap_job: None, journal, dir, keypair })
+        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, shadow: None, shadow_at: 0, last_delta: None, journal, dir, keypair };
+        if n.cfg.node.snapshot_every > 0 {
+            n.start_shadow()?;
+        }
+        Ok(n)
     }
 
     /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
@@ -120,6 +126,13 @@ impl Node {
         self.last_offset = Some(offset);
         let limits = (self.cfg.node.stream_catchup_blocks, self.cfg.node.stream_catchup_bytes);
         remember(&mut self.recent, &mut self.recent_bytes, limits, ex.block.header.height, offset, &ex);
+        // Delta del blocco: per lo stream e per lo stato ombra (mai bloccante).
+        let delta = Arc::new(crate::stream::block_delta(self, &ex));
+        self.last_delta = Some((ex.block.header.height, delta.clone()));
+        if let Some(s) = self.shadow.as_mut() {
+            s.send(crate::shadow::Msg::Block { height: ex.block.header.height, state_hash: ex.block.header.state_hash, delta });
+            self.shadow_at = ex.block.header.height;
+        }
         let every = self.cfg.node.snapshot_every;
         if every > 0 && ex.block.header.height % every == 0 {
             let t = Instant::now();
@@ -168,35 +181,54 @@ impl Node {
         self.dir.join("journal.bin")
     }
 
-    /// Snapshot all'altezza corrente, scritto su un altro thread. Sul thread del nodo
-    /// restano solo la copia della mappa degli account (i dati sono condivisi con `Arc`:
-    /// un account modificato dopo viene copiato dal nodo, lo snapshot resta quello di
-    /// questa altezza) e la codifica degli stati della finestra. Se il precedente è
-    /// ancora in scrittura, questo si salta. Il file vale solo dopo il rename: un arresto
-    /// a metà lascia valido lo snapshot precedente, che con il journal ridà lo stesso stato.
-    pub fn snapshot(&mut self) -> Result<(), String> {
-        if self.snap_job.as_ref().is_some_and(|j| !j.is_finished()) {
-            self.snapshots_skipped += 1;
-            eprintln!("snapshot {} skipped: the previous one is still being written", self.chain.height);
-            return Ok(());
-        }
-        self.wait_snapshot()?;
+    /// Stato ombra dallo stato attuale: una copia della mappa, all'avvio (o se lo stato
+    /// è cambiato fuori da `tick`, come nei test che producono blocchi a mano).
+    fn start_shadow(&mut self) -> Result<(), String> {
+        self.shadow = None; // il precedente finisce la scrittura in corso
         let c = &self.chain;
-        let (height, gh, sh) = (c.height, c.genesis_hash, c.state_hash());
-        let accounts: Vec<(Address, solana_account::AccountSharedData)> = c.svm.accounts().iter().map(|(k, a)| (*k, a.clone())).collect();
-        let status = self.index.encode(height);
-        let dir = self.dir.clone();
-        let job = std::thread::Builder::new().name("centrifuga-snapshot".into()).spawn(move || write_snapshot_and_status(&dir, height, gh, sh, accounts, &status));
-        self.snap_job = Some(job.map_err(|e| format!("snapshot thread: {e}"))?);
+        let accounts = c.svm.accounts().clone();
+        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules)?);
+        self.shadow_at = c.height;
         Ok(())
     }
 
-    /// Aspetta la scrittura dello snapshot in corso e ne restituisce l'esito.
-    pub fn wait_snapshot(&mut self) -> Result<(), String> {
-        match self.snap_job.take() {
-            Some(j) => j.join().map_err(|_| "snapshot thread panicked".to_string())?,
-            None => Ok(()),
+    /// Snapshot all'altezza corrente, scritto in background dallo stato ombra: sul thread
+    /// del nodo restano la codifica degli stati della finestra e un invio non bloccante.
+    /// Se lo scrittore è occupato o l'ombra è persa, lo snapshot si salta (contato). Il
+    /// file vale solo dopo il rename: un arresto a metà lascia valido il precedente.
+    /// Senza ombra (`snapshot_every = 0`) lo snapshot si scrive qui, in modo sincrono.
+    pub fn snapshot(&mut self) -> Result<(), String> {
+        let c = &self.chain;
+        let (height, gh, sh) = (c.height, c.genesis_hash, c.state_hash());
+        let status = self.index.encode(height);
+        if self.shadow.is_none() {
+            let accounts = c.svm.accounts().iter().map(|(k, a)| (*k, a.clone())).collect();
+            return write_snapshot_and_status(&self.dir, height, gh, sh, accounts, &status);
         }
+        if self.shadow_at != height {
+            self.start_shadow()?;
+        }
+        let shadow = self.shadow.as_mut().unwrap();
+        shadow.send(crate::shadow::Msg::Snapshot { height, genesis_hash: gh, state_hash: sh, status });
+        Ok(())
+    }
+
+    /// Aspetta la scrittura dello snapshot in corso; restituisce il primo errore dello
+    /// stato ombra (divergenza, scrittura), se c'è.
+    pub fn wait_snapshot(&mut self) -> Result<(), String> {
+        self.shadow.as_mut().map_or(Ok(()), |s| s.wait())
+    }
+
+    /// Snapshot saltati (scrittore occupato, ombra persa o in errore) e scritti.
+    pub fn snapshot_counts(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.shadow.as_ref().map_or((0, 0), |s| (s.stats.skipped.load(Relaxed), s.stats.written.load(Relaxed)))
+    }
+
+    /// Solo test: accesso diretto al thread dell'ombra.
+    #[doc(hidden)]
+    pub fn shadow_for_test(&mut self) -> Option<&mut crate::shadow::Shadow> {
+        self.shadow.as_mut()
     }
 }
 
@@ -209,9 +241,9 @@ impl Drop for Node {
     }
 }
 
-/// Thread dello snapshot: ordina, scrive `snapshot.tmp` e `status.tmp` con fsync, poi li
-/// rinomina (prima lo snapshot, poi gli stati della stessa altezza).
-fn write_snapshot_and_status(
+/// Ordina, scrive `snapshot.tmp` e `status.tmp` con fsync, poi li rinomina (prima lo
+/// snapshot, poi gli stati della stessa altezza).
+pub fn write_snapshot_and_status(
     dir: &std::path::Path,
     height: u64,
     genesis_hash: solana_hash::Hash,

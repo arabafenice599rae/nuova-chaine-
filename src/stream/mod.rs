@@ -44,7 +44,9 @@ use crate::rpc::encode::b64;
 /// smette di ricevere e il canale del nodo lo fa restare indietro.
 const SEND_BUFFER: u32 = 256 * 1024;
 
-type Accounts = Vec<(Address, Option<AccountSharedData>)>;
+/// Delta di un blocco: valore dopo il blocco di ogni account toccato; `None` = account
+/// chiuso o cancellato. Lo stesso delta va allo stream e allo stato ombra dello snapshot.
+pub type Accounts = Vec<(Address, Option<AccountSharedData>)>;
 
 fn account_json(k: &Address, a: Option<&AccountSharedData>) -> Value {
     match a {
@@ -74,14 +76,23 @@ fn snapshot(n: &Node, keys: impl IntoIterator<Item = Address>) -> Accounts {
     keys.into_iter().map(|k| (k, n.chain.svm.get(&k).cloned())).collect()
 }
 
+/// Delta del blocco appena eseguito (sul thread del nodo, subito dopo il blocco).
+pub fn block_delta(n: &Node, ex: &Executed) -> Accounts {
+    snapshot(n, ex.changed.iter().copied())
+}
+
 /// Messaggio "solo header e corpo" (come nel recupero dal journal).
 pub fn header_message(b: &Block) -> String {
     block_json(b, None).to_string()
 }
 
-/// Messaggio live per un blocco appena prodotto (sul thread del nodo).
+/// Messaggio live per un blocco appena prodotto (sul thread del nodo): lo stesso delta
+/// già calcolato per lo stato ombra, se è di questo blocco.
 pub fn block_message(n: &Node, ex: &Executed) -> String {
-    block_json(&ex.block, Some(&snapshot(n, ex.changed.iter().copied()))).to_string()
+    match &n.last_delta {
+        Some((h, d)) if *h == ex.block.header.height => block_json(&ex.block, Some(d)).to_string(),
+        _ => block_json(&ex.block, Some(&block_delta(n, ex))).to_string(),
+    }
 }
 
 #[derive(Clone)]
@@ -307,13 +318,26 @@ impl Replica {
         LtState::full(&self.accounts).hash()
     }
 
+    /// Nuovo valore di un account (`None` o 0 lamport = cancellato), con l'LtHash.
+    fn put(&mut self, k: Address, acc: Option<AccountSharedData>) {
+        match acc.filter(|a| a.lamports() > 0) {
+            Some(acc) => {
+                self.lt.replace(&k, self.accounts.get(&k), Some(&acc));
+                self.accounts.insert(k, acc);
+            }
+            None => {
+                let old = self.accounts.remove(&k);
+                self.lt.replace(&k, old.as_ref(), None);
+            }
+        }
+    }
+
     fn apply_accounts(&mut self, list: &Value) -> Result<(), String> {
         for a in list.as_array().ok_or("accounts")? {
             let k: Address = parse(a, "pubkey")?;
             let lamports = field(a, "lamports")?.as_u64().ok_or("lamports")?;
             if lamports == 0 {
-                let old = self.accounts.remove(&k);
-                self.lt.replace(&k, old.as_ref(), None);
+                self.put(k, None);
                 continue;
             }
             let data = decode64(field(a, "data")?.as_str().ok_or("data")?)?;
@@ -321,10 +345,38 @@ impl Replica {
             acc.set_data_from_slice(&data);
             acc.set_executable(field(a, "executable")?.as_bool().ok_or("executable")?);
             acc.set_rent_epoch(field(a, "rent_epoch")?.as_u64().ok_or("rent_epoch")?);
-            self.lt.replace(&k, self.accounts.get(&k), Some(&acc));
-            self.accounts.insert(k, acc);
+            self.put(k, Some(acc));
         }
         Ok(())
+    }
+
+    /// Replica di fiducia (stesso processo del nodo, nessuna firma da verificare) partita
+    /// dallo stato a `height` con hash di stato `state_hash`: la usa lo stato ombra dello
+    /// snapshot. L'LtHash completo si calcola qui, sul thread che la chiama.
+    pub fn from_state(height: u64, state_hash: Hash, accounts: HashMap<Address, AccountSharedData>, rules: crate::exec::Rules) -> Result<Replica, String> {
+        let lt = LtState::full(&accounts);
+        let mut r = Replica::new(Address::default(), rules);
+        (r.height, r.last_state, r.accounts, r.lt) = (height, state_hash, accounts, lt);
+        r.check_state()?;
+        Ok(r)
+    }
+
+    /// Delta di un blocco senza JSON (stessi valori dello stream): applica e verifica
+    /// che l'LtHash incrementale coincida con l'hash di stato del blocco.
+    pub fn apply_delta(&mut self, height: u64, state_hash: Hash, delta: &Accounts) -> Result<(), String> {
+        for (k, a) in delta {
+            self.put(*k, a.clone());
+        }
+        (self.height, self.last_state) = (height, state_hash);
+        self.check_state()
+    }
+
+    /// Solo per i test: cambia un account senza aggiornare l'LtHash (divergenza simulata).
+    #[doc(hidden)]
+    pub fn tamper(&mut self, k: &Address) {
+        if let Some(a) = self.accounts.get_mut(k) {
+            a.set_lamports(a.lamports() + 1);
+        }
     }
 
     fn check_state(&self) -> Result<(), String> {

@@ -149,3 +149,111 @@ fn snapshot_with_wrong_state_hash_is_refused() {
     let e = Node::open(cfg, op()).err().unwrap();
     assert!(e.contains("format v1"), "{e}");
 }
+
+/// Snapshot sincrono di riferimento della catena di `n` (in un'altra cartella).
+fn reference(n: &Node, name: &str) -> Vec<u8> {
+    let d = dir(name);
+    std::fs::create_dir_all(&d).unwrap();
+    let c = &n.chain;
+    ledger::write_snapshot(&d, c.height, c.genesis_hash, c.state_hash(), c.svm.accounts().iter()).unwrap();
+    std::fs::read(d.join("snapshot.bin")).unwrap()
+}
+
+/// Un account creato, chiuso (saldo a zero: cancellato) e ricreato: gli snapshot dallo
+/// stato ombra coincidono con quelli sincroni, con l'account assente e poi di nuovo presente.
+#[test]
+fn shadow_follows_closed_and_recreated_accounts() {
+    let x = Keypair::new_from_array([9; 32]);
+    let (u, lamports) = (user(), LAMPORTS_PER_CNFA);
+    // Chiusura: il pagatore è u, x firma il trasferimento di tutto il suo saldo.
+    let close = |bh| {
+        let ix = solana_system_interface::instruction::transfer(&x.pubkey(), &u.pubkey(), lamports);
+        let msg = solana_message::Message::new_with_blockhash(&[ix], Some(&u.pubkey()), &bh);
+        solana_transaction::versioned::VersionedTransaction::try_new(solana_message::VersionedMessage::Legacy(msg), &[&u, &x]).unwrap()
+    };
+    let script = |n: &mut Node, t0: u64, i: u64| {
+        let bh = n.chain.last_hash;
+        let txs = match i {
+            1 | 3 => vec![transfer_tx(&u, &x.pubkey(), lamports, bh)], // crea / ricrea
+            2 => vec![close(bh)],
+            _ => vec![],
+        };
+        n.ingress.submit(None, txs);
+        n.tick(t0 + i * 100).unwrap();
+    };
+    let (da, dc) = (dir("shadow_close_a"), dir("shadow_close_c"));
+    let ca = config(&da, 2);
+    let t0 = ca.genesis.timestamp_ms;
+    let (mut a, mut c) = (Node::open(ca, op()).unwrap(), Node::open(config(&dc, 0), op()).unwrap());
+    for i in 1..=4 {
+        script(&mut a, t0, i);
+        script(&mut c, t0, i);
+        if i % 2 == 0 {
+            a.wait_snapshot().unwrap();
+            let present = c.chain.svm.get(&x.pubkey()).is_some();
+            assert_eq!(present, i == 4, "blocco {i}: x chiuso al 2, ricreato al 3");
+            assert_eq!(std::fs::read(da.join("snapshot.bin")).unwrap(), reference(&c, &format!("shadow_close_ref{i}")), "snapshot {i} uguale al sincrono");
+        }
+    }
+    assert_eq!(a.snapshot_counts(), (0, 2));
+}
+
+/// Divergenza simulata nello stato ombra: lo snapshot non viene scritto, l'errore è
+/// segnalato e resta valido quello precedente. Due casi: account toccato dopo (lo vede il
+/// controllo dell'LtHash a ogni blocco) e mai più toccato (lo vede il ricalcolo completo
+/// dell'LtHash della copia, prima di scrivere).
+#[test]
+fn diverged_shadow_does_not_write_and_reports() {
+    for (case, k, expected) in [
+        ("touched", user().pubkey(), "diverged"),
+        ("untouched", centrifuga::genesis::vault_address("airdrop"), "not written"),
+    ] {
+        let d = dir(&format!("shadow_diverge_{case}"));
+        let cfg = config(&d, 5);
+        let t0 = cfg.genesis.timestamp_ms;
+        let mut n = Node::open(cfg.clone(), op()).unwrap();
+        for i in 1..=5 {
+            block(&mut n, t0, i);
+        }
+        n.wait_snapshot().unwrap();
+        let before = std::fs::read(d.join("snapshot.bin")).unwrap();
+        n.shadow_for_test().unwrap().send_blocking(centrifuga::shadow::Msg::Tamper(k));
+        for i in 6..=10 {
+            block(&mut n, t0, i);
+        }
+        let e = n.wait_snapshot().unwrap_err();
+        assert!(e.contains(expected), "{case}: {e}");
+        assert_eq!(std::fs::read(d.join("snapshot.bin")).unwrap(), before, "{case}: snapshot precedente intatto");
+        assert_eq!(n.snapshot_counts().1, 1, "{case}: scritto solo il primo");
+        drop(n);
+        let n = Node::open(cfg, op()).unwrap(); // snapshot 5 + journal
+        assert_eq!(n.chain.height, 10);
+    }
+}
+
+/// Thread dell'ombra fermo: il canale si riempie, il nodo non aspetta (tick veloci), gli
+/// snapshot successivi si saltano e si contano, la memoria resta limitata dal canale.
+#[test]
+fn slow_shadow_skips_snapshots_without_slowing_the_node() {
+    let d = dir("shadow_slow");
+    let cfg = config(&d, 10);
+    let t0 = cfg.genesis.timestamp_ms;
+    let mut n = Node::open(cfg, op()).unwrap();
+    n.shadow_for_test().unwrap().send_blocking(centrifuga::shadow::Msg::Sleep(std::time::Duration::from_secs(3)));
+    let started = std::time::Instant::now();
+    let mut slowest = 0u128;
+    let blocks = centrifuga::shadow::QUEUE_BLOCKS as u64 + 100;
+    for i in 1..=blocks {
+        let t = std::time::Instant::now();
+        n.tick(t0 + i * 100).unwrap();
+        slowest = slowest.max(t.elapsed().as_millis());
+    }
+    let elapsed = started.elapsed();
+    assert!(elapsed < std::time::Duration::from_secs(3), "il nodo non ha aspettato l'ombra: {elapsed:?}");
+    assert!(slowest < 200, "tick più lento {slowest} ms");
+    assert!(n.shadow_for_test().unwrap().lost(), "ombra persa");
+    let (skipped, _) = n.snapshot_counts();
+    assert!(skipped >= 1, "snapshot saltati: {skipped}");
+    let e = n.wait_snapshot().unwrap_err();
+    assert!(e.contains("lost"), "{e}");
+}
