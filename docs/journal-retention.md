@@ -17,20 +17,30 @@ python3 -m venv /tmp/cvenv && /tmp/cvenv/bin/pip install zstandard lz4
 
 Una macchina con 4 vCPU (Xeon 2,1 GHz), un solo core, nessun dizionario.
 
-| algoritmo | unità | rapporto | MB/s compressione | MB/s decompressione |
-|---|---|---|---|---|
-| lz4 | segmenti da 4 MB | 1,94× | 847 | 2.722 |
-| zstd-1 | segmenti da 4 MB | 2,09× | 649 | 299 |
-| zstd-3 | segmenti da 4 MB | 2,42× | 185 | 370 |
-| zstd-9 | segmenti da 4 MB | 2,67× | 72 | 365 |
-| zstd-19 | segmenti da 4 MB | 2,70× | 3 | 2.233 |
-| gzip-6 | segmenti da 4 MB | 2,04× | 52 | 316 |
-| xz-6 | segmenti da 4 MB | 2,70× | 4 | 76 |
-| lz4 | singolo blocco | 1,94× | 1.039 | 3.587 |
-| zstd-1 | singolo blocco | 2,09× | 532 | 1.594 |
-| zstd-3 | singolo blocco | 2,08× | 388 | 2.329 |
-| zstd-9 | singolo blocco | 2,10× | 95 | 2.744 |
-| gzip-6 | singolo blocco | 2,04× | 56 | 313 |
+Colonne: byte per tx dopo la compressione (219 senza); velocità in MB/s di
+compressione e di decompressione; costo per blocco, cioè il tempo per comprimere e
+decomprimere un blocco tipico a 5.000 tx/s (500 tx, ~110 KB); CPU per ora di journal a
+5.000 tx/s (3,9 GB). **Verifica byte per byte: superata per tutte le righe**: lo script
+decomprime ogni segmento e ogni blocco e lo confronta con l'originale
+(`assert back == parts`), poi stampa la riga.
+
+| algoritmo | unità | rapporto | byte/tx | MB/s compr. / decompr. | costo per blocco (compr. / decompr.) | CPU per ora di journal (compr.) |
+|---|---|---|---|---|---|---|
+| lz4 | segmenti da 4 MB | 1,94× | 113 | 847 / 2.722 | 0,13 ms / 0,04 ms | 5 s |
+| zstd-1 | segmenti da 4 MB | 2,09× | 105 | 649 / 299 | 0,17 ms / 0,37 ms | 6 s |
+| zstd-3 | segmenti da 4 MB | 2,42× | 90 | 185 / 370 | 0,59 ms / 0,30 ms | 21 s |
+| zstd-9 | segmenti da 4 MB | 2,67× | 82 | 72 / 365 | 1,52 ms / 0,30 ms | 55 s |
+| zstd-19 | segmenti da 4 MB | 2,70× | 81 | 3 / 2.233 | 36,5 ms / 0,05 ms | 1.314 s |
+| gzip-6 | segmenti da 4 MB | 2,04× | 107 | 52 / 316 | 2,11 ms / 0,35 ms | 76 s |
+| xz-6 | segmenti da 4 MB | 2,70× | 81 | 4 / 76 | 27,4 ms / 1,44 ms | 986 s |
+| lz4 | singolo blocco | 1,94× | 113 | 1.039 / 3.587 | 0,11 ms / 0,03 ms | 4 s |
+| zstd-1 | singolo blocco | 2,09× | 105 | 532 / 1.594 | 0,21 ms / 0,07 ms | 7 s |
+| zstd-3 | singolo blocco | 2,08× | 105 | 388 / 2.329 | 0,28 ms / 0,05 ms | 10 s |
+| zstd-9 | singolo blocco | 2,10× | 104 | 95 / 2.744 | 1,15 ms / 0,04 ms | 41 s |
+| gzip-6 | singolo blocco | 2,04× | 107 | 56 / 313 | 1,96 ms / 0,35 ms | 70 s |
+
+Nella proposta (§2) la compressione non è sul thread del nodo: il costo per blocco indica
+quanta CPU serve all'archiviazione, non un ritardo dei blocchi.
 
 Le velocità di decompressione su segmenti da 4 MB sono una sola misura e variano molto
 tra varianti (zstd-1 e zstd-19 non dovrebbero differire di 7×): vanno ripetute prima di
