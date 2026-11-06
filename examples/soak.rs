@@ -92,6 +92,10 @@ fn config(dir: &Path, timestamp_ms: u64) -> Config {
     cfg.node.stream_addr = "127.0.0.1:19402".into();
     cfg.node.ingress_pending_per_payer = u32::MAX;
     cfg.node.ingress_tps_per_ip = u32::MAX;
+    // Solo per le misure: finestra del recupero dello stream (default dalla config d'esempio).
+    if let Ok(v) = std::env::var("STREAM_CATCHUP_BLOCKS") {
+        cfg.node.stream_catchup_blocks = v.parse().expect("STREAM_CATCHUP_BLOCKS");
+    }
     cfg
 }
 
@@ -141,10 +145,11 @@ fn main() {
     // Campioni (firma, altezza all'invio) per il controllo della finestra degli stati.
     let samples: Arc<Mutex<Vec<(Signature, u64)>>> = Arc::default();
     say!(
-        "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi",
+        "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi, stream_catchup_blocks {}",
         if via_rpc { "via HTTP/JSON-RPC (end-to-end)" } else { "diretto all'ingresso (limite del nodo)" },
         cfg.node.rpc_recent_txs,
-        cfg.node.snapshot_every
+        cfg.node.snapshot_every,
+        cfg.node.stream_catchup_blocks
     );
     // Altezza all'inizio del carico: i blocchi fino a qui sono "di preparazione".
     let load_from = rt.block_on(gw.query(|n: &mut Node| n.chain.height)).unwrap();
