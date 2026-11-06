@@ -109,13 +109,24 @@ async fn replica_rebuilds_state_from_stream_only() {
     assert_eq!(follow(&mut ws, &mut rep, h + 3).await, ["delta"]);
     drop(ws);
 
-    // 3. Fuori dalla finestra (200 blocchi): stato completo.
+    // 3. Fuori dalla finestra (200 blocchi): errore, poi la replica chiede lo stato completo.
     let gap = rep.height + 260;
     while height(&gw).await.0 < gap {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let url3 = format!("{url}?from_height={}", rep.height + 1);
+    let url3 = format!("{url}?from_height={}", rep.resume_height());
     let (mut ws, _) = tokio_tungstenite::connect_async(&url3).await.unwrap();
+    let mut refused = None;
+    while let Some(Ok(m)) = ws.next().await {
+        if let Message::Text(t) = m {
+            if let Err(e) = rep.apply(&t) {
+                refused = Some(e);
+            }
+        }
+    }
+    assert!(refused.unwrap().contains(centrifuga::stream::OUT_OF_WINDOW));
+    assert_eq!(rep.resume_height(), 0);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     let h = height(&gw).await.0;
     assert_eq!(follow(&mut ws, &mut rep, h + 3).await, ["full"]);
 

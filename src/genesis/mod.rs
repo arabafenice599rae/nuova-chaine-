@@ -75,8 +75,12 @@ pub struct NodeConfig {
     pub stream_addr: String,
     /// Un client dello stream indietro di più blocchi di così viene disconnesso.
     pub stream_max_lag_blocks: usize,
-    /// Blocchi recuperabili con `from_height` come delta; oltre, stato completo.
+    /// Blocchi recuperabili con `from_height` come delta. Oltre (o oltre
+    /// `stream_catchup_bytes`) il client riceve un errore e riparte dallo stato completo.
     pub stream_catchup_blocks: usize,
+    /// Limite in byte della stessa finestra (indirizzi degli account cambiati in RAM).
+    #[serde(default = "default_stream_catchup_bytes")]
+    pub stream_catchup_bytes: usize,
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
@@ -295,6 +299,10 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn default_stream_catchup_bytes() -> usize {
+    128 << 20
 }
 
 fn default_rpc_recent_txs() -> usize {

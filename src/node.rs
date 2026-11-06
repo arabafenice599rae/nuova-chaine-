@@ -26,7 +26,10 @@ pub struct Node {
     pub cfg: Config,
     pub index: TxIndex,
     /// Ultimi blocchi per il recupero dello stream: (altezza, offset nel journal, account cambiati).
+    /// Limitati da `stream_catchup_blocks` e `stream_catchup_bytes`: vale il primo raggiunto.
     pub recent: VecDeque<(u64, u64, Vec<Address>)>,
+    /// Byte stimati di `recent` (indirizzi più l'intestazione di ogni voce).
+    pub recent_bytes: usize,
     /// Istante di arrivo delle richieste sendTransaction, per misurare il tempo nel nodo.
     pub arrivals: HashMap<solana_signature::Signature, Instant>,
     /// Ora dell'ultimo blocco prodotto da questo processo (None dopo l'avvio).
@@ -56,8 +59,8 @@ impl Node {
         chain.reserve_signatures(window);
         let mut index = TxIndex::new(chain.params.blockhash_window as u64, cfg.node.rpc_recent_txs, window);
         index.load(&dir, snap_height).map_err(|e| format!("status.bin: {e}"))?;
-        let mut recent = VecDeque::new();
-        let window = cfg.node.stream_catchup_blocks;
+        let (mut recent, mut recent_bytes) = (VecDeque::new(), 0);
+        let limits = (cfg.node.stream_catchup_blocks, cfg.node.stream_catchup_bytes);
         let mut last_offset = None;
         let journal = Journal::open(&dir.join("journal.bin"), |b, offset| {
             last_offset = Some(offset);
@@ -72,7 +75,7 @@ impl Node {
             } else {
                 let ex = chain.apply(&b)?;
                 index.record(&ex, |_| None);
-                remember(&mut recent, window, b.header.height, offset, &ex);
+                remember(&mut recent, &mut recent_bytes, limits, b.header.height, offset, &ex);
                 Ok(())
             }
         })?;
@@ -80,7 +83,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, journal, dir, keypair })
     }
 
     /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
@@ -106,7 +109,8 @@ impl Node {
             self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
         }
         self.last_offset = Some(offset);
-        remember(&mut self.recent, self.cfg.node.stream_catchup_blocks, ex.block.header.height, offset, &ex);
+        let limits = (self.cfg.node.stream_catchup_blocks, self.cfg.node.stream_catchup_bytes);
+        remember(&mut self.recent, &mut self.recent_bytes, limits, ex.block.header.height, offset, &ex);
         let every = self.cfg.node.snapshot_every;
         if every > 0 && ex.block.header.height % every == 0 {
             self.snapshot()?;
@@ -251,10 +255,20 @@ impl Running {
     }
 }
 
-fn remember(recent: &mut VecDeque<(u64, u64, Vec<Address>)>, window: usize, height: u64, offset: u64, ex: &Executed) {
-    recent.push_back((height, offset, ex.changed.iter().copied().collect()));
-    while recent.len() > window {
-        recent.pop_front();
+/// Byte di una voce di `recent`: gli indirizzi più l'intestazione (altezza, offset, Vec).
+pub fn recent_entry_bytes(changed: usize) -> usize {
+    changed * 32 + 48
+}
+
+/// Aggiunge un blocco alla finestra del recupero e toglie i più vecchi finché valgono
+/// entrambi i limiti (blocchi e byte): vale il primo raggiunto.
+fn remember(recent: &mut VecDeque<(u64, u64, Vec<Address>)>, bytes: &mut usize, (max_blocks, max_bytes): (usize, usize), height: u64, offset: u64, ex: &Executed) {
+    let changed: Vec<Address> = ex.changed.iter().copied().collect();
+    *bytes += recent_entry_bytes(changed.len());
+    recent.push_back((height, offset, changed));
+    while recent.len() > max_blocks || (*bytes > max_bytes && !recent.is_empty()) {
+        let (_, _, old) = recent.pop_front().unwrap();
+        *bytes -= recent_entry_bytes(old.len());
     }
 }
 
