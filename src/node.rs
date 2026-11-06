@@ -38,6 +38,8 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
+    /// Durata della scrittura dell'ultimo snapshot (µs, dentro il suo tick): solo misura.
+    pub last_snapshot_us: u64,
     journal: Journal,
     dir: PathBuf,
     keypair: Keypair,
@@ -83,7 +85,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, journal, dir, keypair })
     }
 
     /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
@@ -115,7 +117,9 @@ impl Node {
         remember(&mut self.recent, &mut self.recent_bytes, limits, ex.block.header.height, offset, &ex);
         let every = self.cfg.node.snapshot_every;
         if every > 0 && ex.block.header.height % every == 0 {
+            let t = Instant::now();
             self.snapshot()?;
+            self.last_snapshot_us = t.elapsed().as_micros() as u64;
         }
         let p = &mut ex.phases;
         p.other = started.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);

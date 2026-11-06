@@ -242,13 +242,16 @@ fn main() {
     let (mut rss_last, mut snap_rss, mut snap_lines) = (rss_mb(), Vec::<(u64, u64, Instant)>::new(), Vec::<(u64, u64, u64)>::new());
     while t0.elapsed() < Duration::from_secs(minutes * 60) {
         std::thread::sleep(Duration::from_millis(40));
-        let (h, us, inc, lh) = rt.block_on(gw.query(|n: &mut Node| (n.chain.height, n.last_tick_us, n.index.count, n.chain.last_hash))).unwrap();
+        let (h, us, inc, lh, snap_us) =
+            rt.block_on(gw.query(|n: &mut Node| (n.chain.height, n.last_tick_us, n.index.count, n.chain.last_hash, n.last_snapshot_us))).unwrap();
         if h != last_h {
             ticks.push(us as f64 / 1e3);
             all_ticks.push(us as f64 / 1e3);
-            if every > 0 && h % every == 0 {
-                snap_pauses.push(us as f64 / 1e3); // blocco con snapshot (scritto nel tick)
-                snap_rss.push((h, rss_last, Instant::now() + Duration::from_secs(60)));
+            // Multiplo di `every` superato (il blocco dello snapshot può non essere mai
+            // osservato: sotto carico il nodo produce il successivo prima della query).
+            if every > 0 && last_h > 0 && last_h / every < h / every {
+                snap_pauses.push(snap_us as f64 / 1e3); // scrittura dello snapshot, dentro il suo tick
+                snap_rss.push((h / every * every, rss_last, Instant::now() + Duration::from_secs(60)));
             }
             // Campioni inclusi in questo blocco: latenza dall'invio (risoluzione ~40 ms).
             let waiting: Vec<(Signature, Instant)> = std::mem::take(&mut *pending.lock().unwrap());
@@ -381,7 +384,7 @@ fn main() {
     say!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
     say!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
     say!(
-        "snapshot durante il carico: {} (blocchi con snapshot: {}), pausa massima {:.0} ms",
+        "snapshot durante il carico: {} (scrittura dello snapshot nel suo blocco: {}), massimo {:.0} ms",
         snap_pauses.len(),
         snap_pauses.iter().map(|p| format!("{p:.0} ms")).collect::<Vec<_>>().join(", "),
         snap_pauses.iter().cloned().fold(0.0, f64::max)
