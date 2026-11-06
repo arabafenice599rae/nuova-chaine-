@@ -12,6 +12,9 @@
 //!     netto coerenti con il saldo letto via RPC.
 //! Alla fine scrive soak.meta; `--reopen` misura il riavvio da snapshot + journal e la
 //! riesecuzione completa dallo stato iniziale, e confronta gli hash con il nodo vivo.
+//! Ogni riga dei risultati va anche nel file $RESULTS (aggiunta in coda con fsync): un
+//! arresto del processo o del container non cancella i dati già raccolti. Lancio con
+//! scripts/soak-run.sh, che non riparte da capo un run interrotto.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,6 +38,21 @@ const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 const SENDERS: u64 = 4_000;
 const SIGNERS: u64 = 3;
 const RPC: &str = "127.0.0.1:19400";
+
+/// Riga dei risultati: su stdout e in coda a $RESULTS, subito su disco.
+fn emit(line: String) {
+    use std::io::Write;
+    println!("{line}");
+    if let Ok(path) = std::env::var("RESULTS") {
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("RESULTS");
+        writeln!(f, "{line}").unwrap();
+        f.sync_data().unwrap();
+    }
+}
+
+macro_rules! say {
+    ($($t:tt)*) => { emit(format!($($t)*)) };
+}
 
 fn key(i: u64) -> Keypair {
     Keypair::new_from_array(Sha256::digest(i.to_le_bytes()).into())
@@ -99,6 +117,13 @@ fn main() {
     let dir = std::env::var("LOAD_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("centrifuga-soak"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    let cpu = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default().lines().find(|l| l.starts_with("model name")).map(|l| l.split(": ").nth(1).unwrap_or("").to_string()).unwrap_or_default();
+    say!(
+        "macchina: {} vCPU, {cpu}; commit {}; avvio {} ms (unix)",
+        std::thread::available_parallelism().map_or(0, |n| n.get()),
+        std::env::var("GIT_COMMIT").unwrap_or_else(|_| "?".into()),
+        node::now_ms()
+    );
     let ts = node::now_ms() - 86_400_000;
     let cfg = config(&dir, ts);
     initial_state(&cfg, n);
@@ -115,7 +140,7 @@ fn main() {
     let (sent, accepted, stop) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
     // Campioni (firma, altezza all'invio) per il controllo della finestra degli stati.
     let samples: Arc<Mutex<Vec<(Signature, u64)>>> = Arc::default();
-    println!(
+    say!(
         "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi",
         if via_rpc { "via HTTP/JSON-RPC (end-to-end)" } else { "diretto all'ingresso (limite del nodo)" },
         cfg.node.rpc_recent_txs,
@@ -178,7 +203,7 @@ fn main() {
     let balance = |k: &Address| call(&url, "getBalance", json!([k.to_string()])).unwrap()["value"].as_u64().unwrap();
     let parse = |s: &str| -> u64 { (s.trim().trim_end_matches(" CnFA").parse::<f64>().unwrap() * 1e9).round() as u64 };
 
-    println!("| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |");
+    say!("| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |");
     let (t0, mut ticks, mut all_ticks) = (Instant::now(), vec![], vec![]);
     let mut snap_pauses: Vec<f64> = vec![];
     let every = cfg.node.snapshot_every;
@@ -232,7 +257,7 @@ fn main() {
             wallet_line = if good { format!("ok ({line})") } else { format!("ERRORE: {text}") };
         }
         let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
-        println!(
+        say!(
             "| {minute} | {} | {} | {} | {:.0} | {:.1} / {:.1} / {:.1} | {} | {:.0} | {st_ok} / {exp_ok} (errori {st_bad} / {exp_bad}) | {wallet_line} |",
             s - last_sent,
             ac - last_acc,
@@ -262,13 +287,13 @@ fn main() {
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
     let hours = t0.elapsed().as_secs_f64() / 3600.0;
     let j = mb(&dir.join("journal.bin"));
-    println!("totale: inviate {s}, accettate {ac}, rifiutate all'ingresso {}, incluse {inc}, non incluse {}", s - ac, ac.saturating_sub(inc));
-    println!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
-    println!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
-    println!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
-    println!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
-    println!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
-    println!(
+    say!("totale: inviate {s}, accettate {ac}, rifiutate all'ingresso {}, incluse {inc}, non incluse {}", s - ac, ac.saturating_sub(inc));
+    say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
+    say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
+    say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
+    say!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
+    say!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
+    say!(
         "snapshot durante il carico: {} (blocchi con snapshot: {}), pausa massima {:.0} ms",
         snap_pauses.len(),
         snap_pauses.iter().map(|p| format!("{p:.0} ms")).collect::<Vec<_>>().join(", "),
@@ -294,7 +319,7 @@ fn reopen(dir: &Path) {
     let same = (node.chain.height, node.chain.last_hash, node.chain.state_hash()) == (h, lh, sh);
     let snap_h = centrifuga::ledger::read_snapshot(dir).unwrap().map_or(0, |s| s.height);
     drop(node);
-    println!("riavvio da snapshot (altezza {snap_h}) + journal: {restart:.1} s, altezza {h}, hash {}", if same { "uguali" } else { "DIVERSI" });
+    say!("riavvio da snapshot (altezza {snap_h}) + journal: {restart:.1} s, altezza {h}, hash {}", if same { "uguali" } else { "DIVERSI" });
     // Riesecuzione completa dallo stato iniziale (snapshot0), un blocco alla volta.
     let rd = dir.join("replay");
     let _ = std::fs::remove_dir_all(&rd);
@@ -334,9 +359,9 @@ fn reopen(dir: &Path) {
         let (ms, tx): (f64, usize) = v.iter().fold((0.0, 0), |a, x| (a.0 + x.0, a.1 + x.1));
         format!("{} blocchi, {tx} tx, {:.1} s, {:.1} ms/blocco", v.len(), ms / 1e3, ms / v.len().max(1) as f64)
     };
-    println!("riesecuzione completa: stato iniziale {load_state:.1} s, journal {total:.1} s (altezza {})", chain.height);
-    println!("  preparazione (fino all'altezza {load_from}): {}", sum(&prep));
-    println!("  carico: {}", sum(&load));
-    println!("  blocchi vuoti dopo l'inizio del carico (battito, coda): {}", sum(&tail));
-    println!("  hash finale (blocco, stato incrementale, stato ricalcolato) {}", if same { "uguali al nodo vivo" } else { "DIVERSI" });
+    say!("riesecuzione completa: stato iniziale {load_state:.1} s, journal {total:.1} s (altezza {})", chain.height);
+    say!("  preparazione (fino all'altezza {load_from}): {}", sum(&prep));
+    say!("  carico: {}", sum(&load));
+    say!("  blocchi vuoti dopo l'inizio del carico (battito, coda): {}", sum(&tail));
+    say!("  hash finale (blocco, stato incrementale, stato ricalcolato) {}", if same { "uguali al nodo vivo" } else { "DIVERSI" });
 }
