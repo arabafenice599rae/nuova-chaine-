@@ -46,7 +46,7 @@ fn tick_measure_does_not_touch_consensus() {
         assert_eq!(ea.block.hash(), ec.block.hash(), "blocco {i}: stesso hash della catena senza misura");
         assert_eq!(ea.block.header.state_hash, ec.block.header.state_hash);
     }
-    assert_eq!(a.chain.state_hash(&Default::default()), chain.state_hash(&Default::default()));
+    assert_eq!(a.chain.state_hash(), chain.state_hash());
     drop((a, b));
     for f in ["journal.bin", "snapshot.bin", "status.bin"] {
         assert_eq!(std::fs::read(dirs[0].join(f)).unwrap(), std::fs::read(dirs[1].join(f)).unwrap(), "{f} identico");

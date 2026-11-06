@@ -89,7 +89,7 @@ impl Indexer {
         let Some((b, next)) = block_at(&self.journal, self.offset).map_err(|e| e.to_string())? else { return Ok(false) };
         let h = b.header.height;
         if h <= self.snap_height {
-            if h == self.snap_height && self.chain.state_hash(&Default::default()) != b.header.state_hash {
+            if h == self.snap_height && self.chain.state_hash() != b.header.state_hash {
                 return Err(format!("indexer: snapshot {h} diverso dal journal (journal di un'altra chain?)"));
             }
             self.chain.note_block(&b)?;

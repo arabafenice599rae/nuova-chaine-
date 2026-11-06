@@ -54,8 +54,12 @@ Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra pro
 - Genesis hash: il blocco 0 ha come `prev_hash` lo SHA-256 dei parametri di consenso
   (operatore, fee, finestra, fee mining, `slot_ms`, `heartbeat_slots`, vault): chi
   verifica con parametri diversi ottiene un altro genesis.
-- Hash di stato: SHA-256 su tutti gli account ordinati per pubkey (dietro
-  l'interfaccia `StateHasher`, sostituibile da un hasher incrementale).
+- Hash di stato: LtHash omomorfo come in Agave (`solana-lattice-hash`, schema
+  `lthash-blake3-v1`, che entra nei parametri di consenso e quindi nel genesis hash). È
+  la somma degli LtHash degli account; a ogni blocco si toglie il contributo precedente
+  degli account cambiati e si aggiunge il nuovo, quindi il costo dipende dagli account
+  cambiati e non da quelli totali. Nell'header va il checksum blake3 (32 byte).
+  Ricalcolo completo solo all'avvio, come verifica dello snapshot.
 - Blockhash = hash del blocco. Il blockhash del blocco all'altezza h vale nei blocchi
   fino all'altezza h + N (`blockhash_window`, default 300 slot = 30 s), oppure la tx
   usa un durable nonce valido. Anti-duplicati: le firme restano note per lo stesso
