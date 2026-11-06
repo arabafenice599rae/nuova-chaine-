@@ -18,3 +18,4 @@ CPU in % di un core: nodo = thread dei blocchi; rete = runtime tokio (RPC e stre
 | 10 | 296800 | 296800 | 296628 | 4944 | 14.5 / 23.6 / 26.1 | 75 / 108 / 114 | 59 / 48 / 48 / 0 | 863 | 657 | 10 / 10 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
 | 11 | 302900 | 302900 | 303822 | 5064 | 14.9 / 24.2 / 26.9 | 91 / 126 / 131 | 60 / 49 / 49 / 0 | 863 | 724 | 11 / 11 (errori 0 / 0) |  |
 snapshot all'altezza 6000: RSS subito prima 841 MB, 1 minuto dopo 863 MB (+22 MB)
+| 12 | 300050 | 300050 | 300033 | 5001 | 14.2 / 22.3 / 30.4 | 91 / 125 / 131 | 57 / 47 / 47 / 0 | 864 | 790 | 12 / 12 (errori 0 / 0) |  |
