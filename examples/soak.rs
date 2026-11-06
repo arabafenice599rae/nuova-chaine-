@@ -131,7 +131,8 @@ fn main() {
         return reopen(Path::new(&args[1]));
     }
     let via_rpc = args.iter().any(|x| x == "--rpc");
-    let signers_n: u64 = if via_rpc { 16 } else { SIGNERS };
+    // Client HTTP (una connessione per richiesta, come un wallet semplice): RPC_CLIENTS thread.
+    let signers_n: u64 = if via_rpc { std::env::var("RPC_CLIENTS").ok().and_then(|v| v.parse().ok()).unwrap_or(16) } else { SIGNERS };
     let a: Vec<u64> = args.iter().filter(|x| !x.starts_with("--")).map(|x| x.replace('_', "").parse().expect("number")).collect();
     let (n, tps, mut minutes) = (a[0], a[1], a[2]);
     // Gradini (solo misure): STEPS="5000,7500,..." tx/s, STEP_MINUTES minuti ciascuno; ci si
@@ -171,7 +172,7 @@ fn main() {
     // Latenza invio -> inclusione: stessi campioni, con l'istante dell'invio.
     let pending: Arc<Mutex<Vec<(Signature, Instant)>>> = Arc::default();
     say!(
-        "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi, stream_catchup_blocks {}",
+        "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {} ({signers_n} thread client), rpc_recent_txs {}, snapshot ogni {} blocchi, stream_catchup_blocks {}",
         if via_rpc { "via HTTP/JSON-RPC (end-to-end)" } else { "diretto all'ingresso (limite del nodo)" },
         cfg.node.rpc_recent_txs,
         cfg.node.snapshot_every,
