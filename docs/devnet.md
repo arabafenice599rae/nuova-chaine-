@@ -17,6 +17,29 @@ prefinanziati, e come misurare la latenza da una rete esterna.
 Sul tuo computer: Node.js 22 e una copia del repository, per la misura di latenza e
 per lo script del token di prova.
 
+### Sistema operativo per un nodo sotto carico
+
+Con molti account (milioni) e carico continuo, i ritardi dei blocchi vengono soprattutto
+dal disco e dalla memoria del sistema, non dall'esecuzione
+(`docs/soak/diag-10m-60min.md`):
+
+| | impostazione | perché |
+|---|---|---|
+| Transparent huge pages | `enabled = madvise`, `defrag = never` | evita compattazioni della memoria nel mezzo di un blocco |
+| Swap | nessuna durante il funzionamento | una pagina della mappa degli account su swap ferma il thread del nodo; lo swap che `devnet-install.sh` crea per la compilazione su VPS piccoli va spento dopo (`swapoff -a` e la riga in `/etc/fstab`) |
+| CPU | VM con vCPU dedicate | con vCPU condivise il thread del nodo può restare in coda (CPU "rubata", colonna `st` di `vmstat`) |
+| Disco | SSD locale per `data_dir`, non condiviso con altri carichi pesanti | ogni blocco fa un `sync_data` del journal |
+
+```sh
+echo madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo never   | sudo tee /sys/kernel/mm/transparent_hugepage/defrag
+swapon --show            # nessuna riga
+vmstat 1                 # sotto carico, colonna st vicina a 0
+```
+
+Le due righe THP non sopravvivono al riavvio: vanno in un'unità systemd o in
+`/etc/rc.local` (oppure, su GRUB, `transparent_hugepage=madvise` nella riga del kernel).
+
 ## 1. Sul tuo computer: chiave per la misura di latenza
 
 ```sh

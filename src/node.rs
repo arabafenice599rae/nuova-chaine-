@@ -38,6 +38,12 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
+    /// (altezza, ms unix, µs di sync_data del journal) di ogni blocco: solo misura.
+    pub sync_log: Vec<(u64, u64, u32)>,
+    /// Snapshot scritti: (altezza, ms unix di inizio e di fine, cioè del rename). Solo misura.
+    pub snapshot_log: Vec<(u64, u64, u64)>,
+    /// Blocchi oltre 50 ms con la loro diagnosi (solo misura, al massimo 100.000).
+    pub slow_blocks: Vec<BlockDiag>,
     /// Durata della scrittura dell'ultimo snapshot (µs, dentro il suo tick): solo misura.
     pub last_snapshot_us: u64,
     journal: Journal,
@@ -85,7 +91,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, sync_log: vec![], snapshot_log: vec![], slow_blocks: vec![], last_snapshot_us: 0, journal, dir, keypair })
     }
 
     /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
@@ -105,6 +111,9 @@ impl Node {
         let mut ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
         let t = Instant::now();
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
+        if self.sync_log.len() < 1_000_000 {
+            self.sync_log.push((ex.block.header.height, crate::node::now_ms(), self.journal.last_sync.as_micros() as u32));
+        }
         ex.phases.journal = t.elapsed();
         let arrivals = &mut self.arrivals;
         let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
@@ -117,9 +126,10 @@ impl Node {
         remember(&mut self.recent, &mut self.recent_bytes, limits, ex.block.header.height, offset, &ex);
         let every = self.cfg.node.snapshot_every;
         if every > 0 && ex.block.header.height % every == 0 {
-            let t = Instant::now();
+            let (t, start) = (Instant::now(), crate::node::now_ms());
             self.snapshot()?;
             self.last_snapshot_us = t.elapsed().as_micros() as u64;
+            self.snapshot_log.push((ex.block.header.height, start, crate::node::now_ms()));
         }
         let p = &mut ex.phases;
         p.other = started.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
@@ -142,9 +152,12 @@ impl Node {
                 if self.ingress.is_empty() && now.duration_since(last_block) + slot / 2 < heartbeat {
                     continue; // slot vuoto: nessun blocco
                 }
+                let before = Probe::take(&self);
                 let ex = self.tick(crate::node::now_ms())?;
                 last_block = now;
+                let t = Instant::now();
                 on_block(&self, &ex);
+                before.finish(&mut self, &ex, t.elapsed());
                 // Anche se la produzione non sta nello slot, le query non restano mai ferme.
                 if let Ok(q) = queries.try_recv() {
                     q(&mut self);
@@ -168,6 +181,84 @@ impl Node {
         self.index.save(&self.dir, self.chain.height).map_err(|e| format!("status.bin: {e}"))?;
         let c = &self.chain;
         ledger::write_snapshot(&self.dir, c.height, c.genesis_hash, c.svm.accounts().iter()).map_err(|e| format!("snapshot: {e}"))
+    }
+}
+
+/// Diagnosi di un blocco lento (> 50 ms con la pubblicazione): solo misura.
+#[derive(Clone, Debug, Default)]
+pub struct BlockDiag {
+    pub height: u64,
+    /// µs: totale (blocco + pubblicazione) e fasi.
+    pub total_us: u64,
+    pub exec_us: u64,
+    pub hash_us: u64,
+    pub sign_us: u64,
+    pub write_us: u64,
+    pub sync_us: u64,
+    pub publish_us: u64,
+    /// Page fault del thread del nodo durante il blocco.
+    pub minflt: u64,
+    pub majflt: u64,
+    /// Attesa in coda CPU del thread del nodo durante il blocco (µs, schedstat).
+    pub wait_us: u64,
+    /// len() e capacity() della mappa degli account prima e dopo.
+    pub len: (usize, usize),
+    pub cap: (usize, usize),
+}
+
+/// Contatori del thread del nodo all'inizio di un blocco.
+struct Probe {
+    t: Instant,
+    flt: (u64, u64),
+    wait_ns: u64,
+    len: usize,
+    cap: usize,
+}
+
+fn thread_faults() -> (u64, u64) {
+    let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: getrusage scrive solo nella struttura passata.
+    let ok = unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut u) } == 0;
+    if ok { (u.ru_minflt as u64, u.ru_majflt as u64) } else { (0, 0) }
+}
+
+/// Secondo campo di /proc/thread-self/schedstat: ns passati in coda, pronti ma senza CPU.
+fn sched_wait_ns() -> u64 {
+    std::fs::read_to_string("/proc/thread-self/schedstat").ok().and_then(|s| s.split_whitespace().nth(1)?.parse().ok()).unwrap_or(0)
+}
+
+impl Probe {
+    fn take(n: &Node) -> Probe {
+        let m = n.chain.svm.accounts();
+        Probe { t: Instant::now(), flt: thread_faults(), wait_ns: sched_wait_ns(), len: m.len(), cap: m.capacity() }
+    }
+
+    fn finish(self, n: &mut Node, ex: &Executed, publish: Duration) {
+        let total = self.t.elapsed();
+        if total < Duration::from_millis(50) {
+            return;
+        }
+        let (flt, m) = (thread_faults(), n.chain.svm.accounts());
+        let us = |d: Duration| d.as_micros() as u64;
+        let d = BlockDiag {
+            height: ex.block.header.height,
+            total_us: us(total),
+            exec_us: us(ex.phases.exec),
+            hash_us: us(ex.phases.hash),
+            sign_us: us(ex.phases.sign),
+            write_us: us(n.journal.last_write),
+            sync_us: us(n.journal.last_sync),
+            publish_us: us(publish),
+            minflt: flt.0 - self.flt.0,
+            majflt: flt.1 - self.flt.1,
+            wait_us: sched_wait_ns().saturating_sub(self.wait_ns) / 1000,
+            len: (self.len, m.len()),
+            cap: (self.cap, m.capacity()),
+        };
+        eprintln!("slow block {d:?}");
+        if n.slow_blocks.len() < 100_000 {
+            n.slow_blocks.push(d);
+        }
     }
 }
 

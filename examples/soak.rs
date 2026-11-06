@@ -109,6 +109,9 @@ fn config(dir: &Path, timestamp_ms: u64) -> Config {
     cfg.node.ingress_pending_per_payer = u32::MAX;
     cfg.node.ingress_tps_per_ip = u32::MAX;
     // Solo per le misure: finestra del recupero dello stream (default dalla config d'esempio).
+    if let Ok(v) = std::env::var("SNAPSHOT_EVERY") {
+        cfg.node.snapshot_every = v.parse().expect("SNAPSHOT_EVERY");
+    }
     if let Ok(v) = std::env::var("STREAM_CATCHUP_BLOCKS") {
         cfg.node.stream_catchup_blocks = v.parse().expect("STREAM_CATCHUP_BLOCKS");
     }
@@ -240,8 +243,13 @@ fn main() {
     let (mut cpu_last, mut cpu_total) = (cpu_ticks(), [0u64; 4]);
     // Snapshot: (altezza, RSS subito prima, istante + 60 s); poi la riga con il RSS dopo 1 minuto.
     let (mut rss_last, mut snap_rss, mut snap_lines) = (rss_mb(), Vec::<(u64, u64, Instant)>::new(), Vec::<(u64, u64, u64)>::new());
+    let dirty_samples: Mutex<Vec<(u64, u64)>> = Mutex::new(vec![]);
     while t0.elapsed() < Duration::from_secs(minutes * 60) {
         std::thread::sleep(Duration::from_millis(40));
+        // Dirty di /proc/meminfo (kB) a ogni giro, per il picco durante le scritture.
+        if let Some(kb) = std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("Dirty:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok())) {
+            dirty_samples.lock().unwrap().push((node::now_ms(), kb));
+        }
         let (h, us, inc, lh, snap_us) =
             rt.block_on(gw.query(|n: &mut Node| (n.chain.height, n.last_tick_us, n.index.count, n.chain.last_hash, n.last_snapshot_us))).unwrap();
         if h != last_h {
@@ -359,6 +367,90 @@ fn main() {
     say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
     say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
+    // sync_data del journal: nella finestra reale di ogni snapshot (dall'inizio al rename),
+    // nella finestra fissa di 600 blocchi dall'altezza dello snapshot, e nel resto.
+    let (sync_log, windows) = rt.block_on(gw.query(|n: &mut Node| (n.sync_log.clone(), n.snapshot_log.clone()))).unwrap();
+    let dirty = dirty_samples.lock().unwrap().clone();
+    let every_s = cfg.node.snapshot_every;
+    say!("");
+    say!("| snapshot (altezza) | durata s | picco Dirty MB | blocchi nella finestra | sync_data p99 / max ms |");
+    say!("|---|---|---|---|---|");
+    let (mut real, mut fixed, mut rest): (Vec<f64>, Vec<f64>, Vec<f64>) = (vec![], vec![], vec![]);
+    for (h, t0, t1) in &windows {
+        let mut w: Vec<f64> = sync_log.iter().filter(|(_, t, _)| t >= t0 && t <= t1).map(|x| x.2 as f64 / 1e3).collect();
+        let peak = dirty.iter().filter(|(t, _)| t >= t0 && t <= t1).map(|x| x.1).max().unwrap_or(0);
+        say!("| {h} | {:.1} | {} | {} | {:.1} / {:.1} |", (t1 - t0) as f64 / 1e3, peak / 1024, w.len(), pct(&mut w, 0.99), pct(&mut w, 1.0));
+        real.append(&mut w);
+    }
+    for (h, t, us) in &sync_log {
+        let ms = *us as f64 / 1e3;
+        if windows.iter().any(|(_, t0, t1)| t >= t0 && t <= t1) {
+            continue;
+        }
+        if every_s > 0 && *h >= every_s && h % every_s < 600 { fixed.push(ms) } else { rest.push(ms) }
+    }
+    let mut fixed_all = fixed.clone();
+    fixed_all.extend(real.iter().copied());
+    say!("");
+    say!(
+        "sync_data del journal: finestra reale degli snapshot ({} blocchi) p99 {:.1} / max {:.1} ms; finestra fissa di 600 blocchi ({} blocchi) p99 {:.1} / max {:.1} ms; resto ({} blocchi) p99 {:.1} / max {:.1} ms; picco Dirty in tutta la prova {} MB",
+        real.len(), pct(&mut real, 0.99), pct(&mut real, 1.0),
+        fixed_all.len(), pct(&mut fixed_all, 0.99), pct(&mut fixed_all, 1.0),
+        rest.len(), pct(&mut rest, 0.99), pct(&mut rest, 1.0),
+        dirty.iter().map(|x| x.1).max().unwrap_or(0) / 1024
+    );
+    // Blocchi oltre 100 ms per causa (il primo criterio che vale, in quest'ordine).
+    let every = cfg.node.snapshot_every;
+    let slow: Vec<_> = rt.block_on(gw.query(|n: &mut Node| n.slow_blocks.clone())).unwrap().into_iter().filter(|d| d.total_us > 100_000).collect();
+    let cause = |d: &centrifuga::node::BlockDiag| {
+        if every > 0 && d.height % every == 0 {
+            "snapshot"
+        } else if d.sync_us * 2 > d.total_us {
+            "disco (sync_data)"
+        } else if d.cap.0 != d.cap.1 {
+            "resize della mappa"
+        } else if d.wait_us * 2 > d.total_us {
+            "CPU rubata (attesa in coda)"
+        } else if d.majflt > 0 || d.minflt > 1000 {
+            "page fault"
+        } else {
+            "altro"
+        }
+    };
+    let mut by: std::collections::BTreeMap<&str, (usize, u64)> = Default::default();
+    for d in &slow {
+        let e = by.entry(cause(d)).or_default();
+        e.0 += 1;
+        e.1 = e.1.max(d.total_us);
+    }
+    say!("");
+    say!("| causa dei blocchi > 100 ms | blocchi | max ms |");
+    say!("|---|---|---|");
+    for (c, (k, m)) in &by {
+        say!("| {c} | {k} | {:.0} |", *m as f64 / 1e3);
+    }
+    say!("");
+    for d in slow.iter().take(200) {
+        say!(
+            "blocco {} ({}): {:.0} ms = esecuzione {:.0} + hash {:.0} + firma {:.0} + write {:.1} + sync_data {:.1} + pubblicazione {:.1}; minflt {} majflt {}; attesa CPU {:.0} ms; mappa {}->{} (capacity {}->{})",
+            d.height,
+            cause(d),
+            d.total_us as f64 / 1e3,
+            d.exec_us as f64 / 1e3,
+            d.hash_us as f64 / 1e3,
+            d.sign_us as f64 / 1e3,
+            d.write_us as f64 / 1e3,
+            d.sync_us as f64 / 1e3,
+            d.publish_us as f64 / 1e3,
+            d.minflt,
+            d.majflt,
+            d.wait_us as f64 / 1e3,
+            d.len.0,
+            d.len.1,
+            d.cap.0,
+            d.cap.1
+        );
+    }
     say!(
         "invio→inclusione ({} campioni, 1 ogni ~1000 tx, risoluzione ~40 ms): p50 {:.0} / p95 {:.0} / p99 {:.0} / max {:.0} ms",
         all_lat.len(),

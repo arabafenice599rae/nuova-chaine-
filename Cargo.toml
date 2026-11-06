@@ -13,6 +13,8 @@ description = "Chain SVM a validatore unico: chi costruisce il blocco è chi lo 
 litesvm = { version = "=0.18.2", features = ["persistence-internal", "precompiles"] }
 # Crate Solana già presenti nel grafo di litesvm (stesse versioni).
 solana-account = "4.7"
+# Solo misure del nodo (getrusage per thread); già nel grafo delle dipendenze.
+libc = "0.2"
 solana-address = { version = "~2.7", features = ["curve25519"] }
 solana-clock = "~3.2"
 solana-hash = "~4.6"
