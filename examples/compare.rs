@@ -252,7 +252,7 @@ fn main() {
         }
     }
     chain.rehash();
-    centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
+    centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.full_state_hash(), chain.svm.accounts().iter()).unwrap();
     let snap_mb = std::fs::metadata(centrifuga::ledger::snapshot_path(&dir)).unwrap().len() as f64 / 1e6;
     drop(chain);
     let kp = || Keypair::try_from(op.to_bytes().as_slice()).unwrap();
@@ -424,6 +424,7 @@ fn main() {
         node.tick(now).unwrap();
     }
     node.snapshot().unwrap();
+    node.wait_snapshot().unwrap();
     drop(node);
     let t = Instant::now();
     let node = Node::open(cfg.clone(), kp()).unwrap();

@@ -109,6 +109,9 @@ fn config(dir: &Path, timestamp_ms: u64) -> Config {
     cfg.node.ingress_pending_per_payer = u32::MAX;
     cfg.node.ingress_tps_per_ip = u32::MAX;
     // Solo per le misure: finestra del recupero dello stream (default dalla config d'esempio).
+    if let Ok(v) = std::env::var("SNAPSHOT_EVERY") {
+        cfg.node.snapshot_every = v.parse().expect("SNAPSHOT_EVERY");
+    }
     if let Ok(v) = std::env::var("STREAM_CATCHUP_BLOCKS") {
         cfg.node.stream_catchup_blocks = v.parse().expect("STREAM_CATCHUP_BLOCKS");
     }
@@ -121,7 +124,7 @@ fn initial_state(cfg: &Config, n: u64) -> genesis::GenesisConfig {
     for i in 0..n {
         chain.svm.set(addr(i), Account { lamports: rent, owner: solana_sdk_ids::system_program::id(), ..Account::default() });
     }
-    centrifuga::ledger::write_snapshot(&cfg.node.data_dir, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
+    centrifuga::ledger::write_snapshot(&cfg.node.data_dir, 0, chain.genesis_hash, chain.full_state_hash(), chain.svm.accounts().iter()).unwrap();
     cfg.genesis.clone()
 }
 
@@ -351,7 +354,9 @@ fn main() {
         std::thread::sleep(Duration::from_millis(50));
     }
     std::thread::sleep(Duration::from_millis(300));
-    let (h, lh, sh, inc, stl) = rt.block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len()))).unwrap();
+    let (h, lh, sh, inc, stl, skipped) = rt
+        .block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), n.snapshots_skipped)))
+        .unwrap();
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
     let hours = t0.elapsed().as_secs_f64() / 3600.0;
     let j = mb(&dir.join("journal.bin"));
@@ -384,11 +389,12 @@ fn main() {
     say!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
     say!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
     say!(
-        "snapshot durante il carico: {} (scrittura dello snapshot nel suo blocco: {}), massimo {:.0} ms",
+        "snapshot durante il carico: {} (pausa nel blocco: copia della mappa e degli stati; la scrittura è in background: {}), massimo {:.0} ms",
         snap_pauses.len(),
         snap_pauses.iter().map(|p| format!("{p:.0} ms")).collect::<Vec<_>>().join(", "),
         snap_pauses.iter().cloned().fold(0.0, f64::max)
     );
+    say!("snapshot saltati (il precedente era ancora in scrittura): {skipped}");
     std::fs::write(dir.join("soak.meta"), format!("{n} {ts} {h} {lh} {sh} {load_from}")).unwrap();
     std::process::exit(0); // il nodo gira sul suo thread: si chiude con il processo
 }

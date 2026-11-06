@@ -74,11 +74,14 @@ pub fn read_block_at(file: &mut File, offset: u64) -> Result<Block, String> {
     Block::decode(&buf)
 }
 
-const SNAP_MAGIC: &[u8; 8] = b"CNFASNP1";
+/// v2: l'header porta anche l'hash di stato (LtHash) dell'altezza dello snapshot.
+const SNAP_MAGIC: &[u8; 8] = b"CNFASNP2";
 
 pub struct Snapshot {
     pub height: u64,
     pub genesis_hash: Hash,
+    /// Hash di stato all'altezza dello snapshot: chi lo carica lo ricalcola e lo confronta.
+    pub state_hash: Hash,
     pub accounts: Vec<(Address, AccountSharedData)>,
 }
 
@@ -91,15 +94,30 @@ pub fn write_snapshot<'a>(
     dir: &Path,
     height: u64,
     genesis_hash: Hash,
+    state_hash: Hash,
     accounts: impl Iterator<Item = (&'a Address, &'a AccountSharedData)>,
 ) -> io::Result<()> {
     let mut sorted: Vec<_> = accounts.collect();
     sorted.sort_by_key(|(k, _)| **k);
     let tmp = dir.join("snapshot.tmp");
-    let mut w = BufWriter::new(File::create(&tmp)?);
+    write_snapshot_file(&tmp, height, genesis_hash, state_hash, sorted.into_iter())?;
+    fs::rename(&tmp, snapshot_path(dir))?;
+    File::open(dir)?.sync_all()
+}
+
+/// Scrive (con fsync) uno snapshot già ordinato per indirizzo in `path`.
+pub fn write_snapshot_file<'a>(
+    path: &Path,
+    height: u64,
+    genesis_hash: Hash,
+    state_hash: Hash,
+    sorted: impl ExactSizeIterator<Item = (&'a Address, &'a AccountSharedData)>,
+) -> io::Result<()> {
+    let mut w = BufWriter::new(File::create(path)?);
     w.write_all(SNAP_MAGIC)?;
     w.write_all(&height.to_le_bytes())?;
     w.write_all(genesis_hash.as_ref())?;
+    w.write_all(state_hash.as_ref())?;
     w.write_all(&(sorted.len() as u64).to_le_bytes())?;
     for (k, a) in sorted {
         w.write_all(k.as_ref())?;
@@ -110,9 +128,7 @@ pub fn write_snapshot<'a>(
         w.write_all(&(a.data().len() as u64).to_le_bytes())?;
         w.write_all(a.data())?;
     }
-    w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-    fs::rename(&tmp, snapshot_path(dir))?;
-    File::open(dir)?.sync_all()
+    w.into_inner().map_err(|e| e.into_error())?.sync_all()
 }
 
 pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
@@ -124,6 +140,9 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
     let mut b8 = [0u8; 8];
     let mut b32 = [0u8; 32];
     r.read_exact(&mut b8)?;
+    if &b8 == b"CNFASNP1" {
+        return Err(io::Error::other("snapshot: format v1 (without state hash): delete it and restart from the journal"));
+    }
     if &b8 != SNAP_MAGIC {
         return Err(io::Error::other("snapshot: bad magic"));
     }
@@ -134,6 +153,8 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
     let height = u64_(&mut r)?;
     r.read_exact(&mut b32)?;
     let genesis_hash = Hash::new_from_array(b32);
+    r.read_exact(&mut b32)?;
+    let state_hash = Hash::new_from_array(b32);
     let n = u64_(&mut r)?;
     let mut accounts = Vec::with_capacity(n as usize);
     for _ in 0..n {
@@ -152,5 +173,5 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
         a.set_rent_epoch(rent_epoch);
         accounts.push((key, a));
     }
-    Ok(Some(Snapshot { height, genesis_hash, accounts }))
+    Ok(Some(Snapshot { height, genesis_hash, state_hash, accounts }))
 }

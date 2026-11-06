@@ -182,7 +182,7 @@ fn node_limit(n: u64, storage: &str, blocks: usize) {
         chain.svm.set(addr(i), solana_account::Account { lamports: rent, owner: solana_sdk_ids::system_program::id(), ..Default::default() });
     }
     let snap0 = base.join("snapshot0.bin");
-    centrifuga::ledger::write_snapshot(&base, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
+    centrifuga::ledger::write_snapshot(&base, 0, chain.genesis_hash, chain.full_state_hash(), chain.svm.accounts().iter()).unwrap();
     std::fs::rename(base.join("snapshot.bin"), &snap0).unwrap();
     drop(chain);
     let kp = || Keypair::try_from(op.to_bytes().as_slice()).unwrap();

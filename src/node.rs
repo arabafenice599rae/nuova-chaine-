@@ -38,8 +38,13 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
-    /// Durata della scrittura dell'ultimo snapshot (µs, dentro il suo tick): solo misura.
+    /// Pausa dell'ultimo snapshot nel suo tick (µs: copia della mappa e degli stati; la
+    /// scrittura è su un altro thread): solo misura.
     pub last_snapshot_us: u64,
+    /// Snapshot saltati perché il precedente era ancora in scrittura.
+    pub snapshots_skipped: u64,
+    /// Scrittura in background dello snapshot in corso (o finita e non ancora raccolta).
+    snap_job: Option<std::thread::JoinHandle<Result<(), String>>>,
     journal: Journal,
     dir: PathBuf,
     keypair: Keypair,
@@ -85,7 +90,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, snapshots_skipped: 0, snap_job: None, journal, dir, keypair })
     }
 
     /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
@@ -163,12 +168,69 @@ impl Node {
         self.dir.join("journal.bin")
     }
 
+    /// Snapshot all'altezza corrente, scritto su un altro thread. Sul thread del nodo
+    /// restano solo la copia della mappa degli account (i dati sono condivisi con `Arc`:
+    /// un account modificato dopo viene copiato dal nodo, lo snapshot resta quello di
+    /// questa altezza) e la codifica degli stati della finestra. Se il precedente è
+    /// ancora in scrittura, questo si salta. Il file vale solo dopo il rename: un arresto
+    /// a metà lascia valido lo snapshot precedente, che con il journal ridà lo stesso stato.
     pub fn snapshot(&mut self) -> Result<(), String> {
-        // Prima gli stati della finestra (non lo storico), poi lo snapshot della stessa altezza.
-        self.index.save(&self.dir, self.chain.height).map_err(|e| format!("status.bin: {e}"))?;
+        if self.snap_job.as_ref().is_some_and(|j| !j.is_finished()) {
+            self.snapshots_skipped += 1;
+            eprintln!("snapshot {} skipped: the previous one is still being written", self.chain.height);
+            return Ok(());
+        }
+        self.wait_snapshot()?;
         let c = &self.chain;
-        ledger::write_snapshot(&self.dir, c.height, c.genesis_hash, c.svm.accounts().iter()).map_err(|e| format!("snapshot: {e}"))
+        let (height, gh, sh) = (c.height, c.genesis_hash, c.state_hash());
+        let accounts: Vec<(Address, solana_account::AccountSharedData)> = c.svm.accounts().iter().map(|(k, a)| (*k, a.clone())).collect();
+        let status = self.index.encode(height);
+        let dir = self.dir.clone();
+        let job = std::thread::Builder::new().name("centrifuga-snapshot".into()).spawn(move || write_snapshot_and_status(&dir, height, gh, sh, accounts, &status));
+        self.snap_job = Some(job.map_err(|e| format!("snapshot thread: {e}"))?);
+        Ok(())
     }
+
+    /// Aspetta la scrittura dello snapshot in corso e ne restituisce l'esito.
+    pub fn wait_snapshot(&mut self) -> Result<(), String> {
+        match self.snap_job.take() {
+            Some(j) => j.join().map_err(|_| "snapshot thread panicked".to_string())?,
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Node {
+    /// Chi chiude il nodo trova su disco lo snapshot completo (o il precedente).
+    fn drop(&mut self) {
+        if let Err(e) = self.wait_snapshot() {
+            eprintln!("{e}");
+        }
+    }
+}
+
+/// Thread dello snapshot: ordina, scrive `snapshot.tmp` e `status.tmp` con fsync, poi li
+/// rinomina (prima lo snapshot, poi gli stati della stessa altezza).
+fn write_snapshot_and_status(
+    dir: &std::path::Path,
+    height: u64,
+    genesis_hash: solana_hash::Hash,
+    state_hash: solana_hash::Hash,
+    mut accounts: Vec<(Address, solana_account::AccountSharedData)>,
+    status: &[u8],
+) -> Result<(), String> {
+    use std::io::Write;
+    accounts.sort_unstable_by_key(|(k, _)| *k);
+    let e = |e: std::io::Error| format!("snapshot {height}: {e}");
+    let tmp = dir.join("snapshot.tmp");
+    ledger::write_snapshot_file(&tmp, height, genesis_hash, state_hash, accounts.iter().map(|(k, a)| (k, a))).map_err(e)?;
+    let stmp = dir.join("status.tmp");
+    let mut f = std::fs::File::create(&stmp).map_err(e)?;
+    f.write_all(status).map_err(e)?;
+    f.sync_all().map_err(e)?;
+    std::fs::rename(&tmp, ledger::snapshot_path(dir)).map_err(e)?;
+    std::fs::rename(&stmp, dir.join("status.bin")).map_err(e)?;
+    std::fs::File::open(dir).and_then(|d| d.sync_all()).map_err(e)
 }
 
 /// Nodo avviato: thread del nodo + canali per RPC e stream.
@@ -190,9 +252,14 @@ pub fn chain_from_snapshot(cfg: &Config, dir: &std::path::Path) -> Result<(Chain
     if s.genesis_hash != expected {
         return Err(format!("snapshot of another genesis ({} instead of {expected})", s.genesis_hash));
     }
-    let height = s.height;
+    let (height, stated) = (s.height, s.state_hash);
     let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
-    Ok((Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash), height))
+    let chain = Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash);
+    // Lo snapshot porta l'hash di stato della sua altezza: ricalcolato, deve coincidere.
+    if chain.state_hash() != stated {
+        return Err(format!("snapshot {height}: state hash {} differs from its header {stated}", chain.state_hash()));
+    }
+    Ok((chain, height))
 }
 
 /// Apre il nodo su un thread dedicato (litesvm vive lì) e restituisce i canali.

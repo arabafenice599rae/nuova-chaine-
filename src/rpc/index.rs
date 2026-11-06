@@ -84,6 +84,15 @@ impl TxIndex {
 
     /// Accanto allo snapshot: contatore e stati della finestra (non lo storico).
     pub fn save(&self, dir: &Path, height: u64) -> io::Result<()> {
+        let tmp = dir.join("status.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&self.encode(height))?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, dir.join("status.bin"))
+    }
+
+    /// Contenuto di `status.bin` per lo snapshot all'altezza `height`.
+    pub fn encode(&self, height: u64) -> Vec<u8> {
         let mut w = W(Vec::new());
         w.u64(height);
         w.u64(self.count);
@@ -98,11 +107,7 @@ impl TxIndex {
                 w.bytes(&err.as_ref().map(|e| serde_json::to_vec(e).unwrap()).unwrap_or_default());
             }
         }
-        let tmp = dir.join("status.tmp");
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&w.0)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, dir.join("status.bin"))
+        w.0
     }
 
     /// Stati salvati con lo snapshot all'altezza `height` (i blocchi successivi arrivano

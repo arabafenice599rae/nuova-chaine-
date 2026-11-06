@@ -63,7 +63,7 @@ fn main() {
     chain.rehash();
     let setup_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
+    centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.full_state_hash(), chain.svm.accounts().iter()).unwrap();
     let snap_write_s = t.elapsed().as_secs_f64();
     let snap_mb = std::fs::metadata(centrifuga::ledger::snapshot_path(&dir)).unwrap().len() as f64 / 1e6;
     let total_accounts = chain.svm.accounts().len();
@@ -107,6 +107,7 @@ fn main() {
     assert_eq!(node.chain.state_hash(), node.chain.full_state_hash(), "LtHash incrementale");
     let t = Instant::now();
     node.snapshot().unwrap();
+    node.wait_snapshot().unwrap();
     let snap2_s = t.elapsed().as_secs_f64();
     let (rss_end, hwm) = rss_mb();
     drop(node);
