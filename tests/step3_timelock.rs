@@ -11,7 +11,7 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
 const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
-const OPERATOR_TOTAL: u64 = 20_000_000 * LAMPORTS_PER_CNFA;
+const OPERATOR_TOTAL: u64 = 5_000_000 * LAMPORTS_PER_CNFA;
 
 struct T {
     c: Chain,
@@ -162,6 +162,27 @@ fn withdraw_is_linear_and_only_from_operator_vault() {
     }
     let mut early = setup();
     assert_err(early.withdraw("reserve", early.op.pubkey()), 2);
+}
+
+#[test]
+fn operator_vault_has_no_other_exit() {
+    let mut t = setup();
+    let op = Keypair::try_from(t.op.to_bytes().as_slice()).unwrap();
+    t.until(10);
+    // Niente ondate né claim sul vault dell'operatore.
+    assert_err(t.wave("operator", LAMPORTS_PER_CNFA, 8, &op), 2);
+    let wave = t.wave("reserve", LAMPORTS_PER_CNFA, 8, &op).unwrap();
+    let x = Address::new_unique();
+    assert_err(t.claim("operator", wave, x, LAMPORTS_PER_CNFA, 0, &op, x), 2);
+    // to_reserve non accetta il vault dell'operatore.
+    let accs = vec![AccountMeta::new(vault_address("operator"), false), AccountMeta::new(vault_address("reserve"), false)];
+    assert_err(t.run(&[ix(vec![3], accs)], &op, &[]), 2);
+    // Nessun'altra istruzione: ogni tag oltre 3 è rifiutato.
+    for tag in [4u8, 5, 9, 100, 255] {
+        let accs = vec![AccountMeta::new(vault_address("operator"), false), AccountMeta::new(op.pubkey(), false)];
+        let e = t.run(&[ix(vec![tag, 0, 0, 0, 0, 0, 0, 0, 0], accs)], &op, &[]).unwrap_err();
+        assert!(e.contains("InvalidInstructionData"), "tag {tag}: {e}");
+    }
 }
 
 #[test]
