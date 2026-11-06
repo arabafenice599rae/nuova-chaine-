@@ -19,10 +19,16 @@ check() { # check <nome> <comando...>
 }
 rpc() { curl -sf --cacert "$CA" "https://$DOMAIN" -H 'content-type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":${2:-[]}}"; }
 height() { rpc getSlot | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])'; }
-wait_health() { for _ in $(seq 60); do curl -sf --cacert "$CA" "https://$DOMAIN/health" > /dev/null && return 0; sleep 1; done; return 1; }
+# Dopo un (re)start aspetta il nodo (HTTPS) e anche l'indexer (porta locale): lo storico
+# passa dall'indexer, che si riavvia in parallelo al nodo.
+wait_health() {
+  for _ in $(seq 60); do curl -sf --cacert "$CA" "https://$DOMAIN/health" > /dev/null && break; sleep 1; done
+  for _ in $(seq 60); do (exec 3<> /dev/tcp/127.0.0.1/8903) 2> /dev/null && return 0; sleep 1; done; return 1
+}
 keyhash() { sha256sum "$VAR/operator.json" "$VAR/faucet.json" | cut -d' ' -f1 | tr '\n' ' '; }
 perms() { for k in operator faucet; do s=$(stat -c '%a %U' "$VAR/$k.json"); [ "$s" = "600 centrifuga" ] || { echo "$k: $s"; return 1; }; echo -n "$k: $s; "; done; }
 
+wait_health
 check "servizi attivi" bash -c 'systemctl is-active centrifuga && systemctl is-active centrifuga-indexer && systemctl is-active caddy'
 check "HTTPS /health" bash -c "curl -sf --cacert $CA https://$DOMAIN/health"
 check "HTTPS getVersion" rpc getVersion
