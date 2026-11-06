@@ -38,6 +38,8 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
+    /// (altezza, µs di sync_data del journal) di ogni blocco: solo misura.
+    pub sync_log: Vec<(u64, u32)>,
     /// Pausa dell'ultimo snapshot nel suo tick (µs: codifica degli stati e invio allo
     /// stato ombra; copia e scrittura sono su altri thread): solo misura.
     pub last_snapshot_us: u64,
@@ -94,7 +96,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, shadow: None, slow_blocks: vec![], shadow_at: 0, last_delta: None, journal, dir, keypair };
+        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, sync_log: vec![], last_snapshot_us: 0, shadow: None, slow_blocks: vec![], shadow_at: 0, last_delta: None, journal, dir, keypair };
         if n.cfg.node.snapshot_every > 0 {
             n.start_shadow()?;
         }
@@ -118,6 +120,9 @@ impl Node {
         let mut ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
         let t = Instant::now();
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
+        if self.sync_log.len() < 1_000_000 {
+            self.sync_log.push((ex.block.header.height, self.journal.last_sync.as_micros() as u32));
+        }
         ex.phases.journal = t.elapsed();
         let arrivals = &mut self.arrivals;
         let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();

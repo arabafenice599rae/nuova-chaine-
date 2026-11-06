@@ -17,6 +17,8 @@ pub struct Journal {
     file: File,
     /// Offset di fine file: dove inizierà il prossimo record.
     end: u64,
+    /// Durata dell'ultimo sync_data (solo misura).
+    pub last_sync: std::time::Duration,
 }
 
 impl Journal {
@@ -46,7 +48,7 @@ impl Journal {
             eprintln!("journal: truncating {} incomplete trailing bytes", total - good);
             file.set_len(good).map_err(|e| e.to_string())?;
         }
-        Ok(Journal { file, end: good })
+        Ok(Journal { file, end: good, last_sync: Default::default() })
     }
 
     /// Accoda un blocco e ne restituisce l'offset.
@@ -56,7 +58,9 @@ impl Journal {
         rec.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         rec.extend_from_slice(&bytes);
         self.file.write_all(&rec)?;
+        let t = std::time::Instant::now();
         self.file.sync_data()?;
+        self.last_sync = t.elapsed();
         let at = self.end;
         self.end += rec.len() as u64;
         Ok(at)

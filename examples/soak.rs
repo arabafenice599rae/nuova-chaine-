@@ -365,6 +365,18 @@ fn main() {
     say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
     say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
+    // sync_data del journal per blocco: nei 600 blocchi (60 s) da ogni altezza di snapshot e nel resto.
+    let sync_log = rt.block_on(gw.query(|n: &mut Node| n.sync_log.clone())).unwrap();
+    let every_s = cfg.node.snapshot_every;
+    let (mut during, mut rest): (Vec<f64>, Vec<f64>) = (vec![], vec![]);
+    for (h, us) in &sync_log {
+        if every_s > 0 && *h >= every_s && h % every_s < 600 { during.push(*us as f64 / 1e3) } else { rest.push(*us as f64 / 1e3) }
+    }
+    say!(
+        "sync_data del journal: durante gli snapshot ({} blocchi) p50 {:.2} / p99 {:.1} / max {:.1} ms; resto ({} blocchi) p50 {:.2} / p99 {:.1} / max {:.1} ms",
+        during.len(), pct(&mut during, 0.5), pct(&mut during, 0.99), pct(&mut during, 1.0),
+        rest.len(), pct(&mut rest, 0.5), pct(&mut rest, 0.99), pct(&mut rest, 1.0)
+    );
     say!(
         "invio→inclusione ({} campioni, 1 ogni ~1000 tx, risoluzione ~40 ms): p50 {:.0} / p95 {:.0} / p99 {:.0} / max {:.0} ms",
         all_lat.len(),
