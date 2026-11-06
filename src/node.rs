@@ -216,7 +216,8 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         cfg: cfg.clone(),
     };
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    // Nome del thread: visibile in top -H e nelle misure di CPU per thread.
+    let spawned = std::thread::Builder::new().name("centrifuga-node".into()).spawn(move || {
         let sym = cfg.genesis.symbol.clone();
         let node = match Node::open(cfg, keypair) {
             Ok(n) => n,
@@ -244,6 +245,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
             std::process::exit(1);
         }
     });
+    spawned.map_err(|e| format!("node thread: {e}"))?;
     ready_rx.recv().map_err(|e| e.to_string())??;
     Ok(running)
 }

@@ -70,6 +70,22 @@ fn rss_mb() -> u64 {
     s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).unwrap_or(0) / 1024
 }
 
+/// Tick di CPU (utime + stime, 100 al secondo) per gruppo di thread del processo:
+/// [thread del nodo, rete (tokio: RPC e stream), client di carico, altro].
+fn cpu_ticks() -> [u64; 4] {
+    let mut g = [0u64; 4];
+    for t in std::fs::read_dir("/proc/self/task").into_iter().flatten().flatten() {
+        let Ok(s) = std::fs::read_to_string(t.path().join("stat")) else { continue };
+        let (Some(a), Some(b)) = (s.find('('), s.rfind(')')) else { continue };
+        let f: Vec<&str> = s[b + 2..].split(' ').collect();
+        let ticks = f.get(11).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0) + f.get(12).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
+        let name = &s[a + 1..b];
+        let i = if name == "centrifuga-node" { 0 } else if name.starts_with("tokio-") { 1 } else if name.starts_with("soak-client") { 2 } else { 3 };
+        g[i] += ticks;
+    }
+    g
+}
+
 fn pct(v: &mut [f64], q: f64) -> f64 {
     v.sort_by(f64::total_cmp);
     v.get(((v.len().max(1) - 1) as f64 * q).round() as usize).copied().unwrap_or(0.0)
@@ -144,6 +160,8 @@ fn main() {
     let (sent, accepted, stop) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)), Arc::new(AtomicBool::new(false)));
     // Campioni (firma, altezza all'invio) per il controllo della finestra degli stati.
     let samples: Arc<Mutex<Vec<(Signature, u64)>>> = Arc::default();
+    // Latenza invio -> inclusione: stessi campioni, con l'istante dell'invio.
+    let pending: Arc<Mutex<Vec<(Signature, Instant)>>> = Arc::default();
     say!(
         "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi, stream_catchup_blocks {}",
         if via_rpc { "via HTTP/JSON-RPC (end-to-end)" } else { "diretto all'ingresso (limite del nodo)" },
@@ -155,10 +173,11 @@ fn main() {
     let load_from = rt.block_on(gw.query(|n: &mut Node| n.chain.height)).unwrap();
     let mut signers = vec![];
     for w in 0..signers_n {
-        let (ingress, bh, height, sent, accepted, stop, samples) = (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone());
+        let (ingress, bh, height, sent, accepted, stop, samples, pending) =
+            (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone(), pending.clone());
         let rate = tps as f64 / signers_n as f64;
         let senders: Vec<Keypair> = (0..SENDERS).filter(|i| i % signers_n == w).map(key).collect();
-        signers.push(std::thread::spawn(move || {
+        signers.push(std::thread::Builder::new().name(format!("soak-client-{w}")).spawn(move || {
             let (start, mut done, mut k) = (Instant::now(), 0u64, w);
             while !stop.load(Ordering::Relaxed) {
                 // Ritmo: tx dovute finora, a lotti da 50.
@@ -177,6 +196,7 @@ fn main() {
                     .collect();
                 if k % 1_000 < 50 {
                     samples.lock().unwrap().push((batch[0].signatures[0], height.load(Ordering::Relaxed)));
+                    pending.lock().unwrap().push((batch[0].signatures[0], Instant::now())); // batch[0] parte per prima
                 }
                 let ok = if via_rpc {
                     use base64::Engine;
@@ -195,7 +215,7 @@ fn main() {
                 accepted.fetch_add(ok, Ordering::Relaxed);
                 done += 50;
             }
-        }));
+        }).unwrap());
     }
 
     // Wallet sotto carico.
@@ -208,13 +228,18 @@ fn main() {
     let balance = |k: &Address| call(&url, "getBalance", json!([k.to_string()])).unwrap()["value"].as_u64().unwrap();
     let parse = |s: &str| -> u64 { (s.trim().trim_end_matches(" CnFA").parse::<f64>().unwrap() * 1e9).round() as u64 };
 
-    say!("| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |");
+    say!("CPU in % di un core: nodo = thread dei blocchi; rete = runtime tokio (RPC e stream, lato nodo); client = thread che firmano e inviano (in modalità diretta includono la verifica delle firme all'ingresso)");
+    say!("| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | invio→inclusione p50 / p95 / p99 ms | CPU nodo / rete / client / altro % | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |");
     let (t0, mut ticks, mut all_ticks) = (Instant::now(), vec![], vec![]);
     let mut snap_pauses: Vec<f64> = vec![];
     let every = cfg.node.snapshot_every;
     let (mut last_h, mut last_inc, mut last_sent, mut last_acc) = (0u64, 0u64, 0u64, 0u64);
     let (mut st_ok, mut st_bad, mut exp_ok, mut exp_bad, mut wallet_ok, mut wallet_bad) = (0, 0, 0, 0, 0, 0);
     let (mut minute, mut wallet_line) = (1u64, String::new());
+    let (mut lat, mut all_lat) = (vec![], vec![]);
+    let (mut cpu_last, mut cpu_total) = (cpu_ticks(), [0u64; 4]);
+    // Snapshot: (altezza, RSS subito prima, istante + 60 s); poi la riga con il RSS dopo 1 minuto.
+    let (mut rss_last, mut snap_rss, mut snap_lines) = (rss_mb(), Vec::<(u64, u64, Instant)>::new(), Vec::<(u64, u64, u64)>::new());
     while t0.elapsed() < Duration::from_secs(minutes * 60) {
         std::thread::sleep(Duration::from_millis(40));
         let (h, us, inc, lh) = rt.block_on(gw.query(|n: &mut Node| (n.chain.height, n.last_tick_us, n.index.count, n.chain.last_hash))).unwrap();
@@ -223,11 +248,33 @@ fn main() {
             all_ticks.push(us as f64 / 1e3);
             if every > 0 && h % every == 0 {
                 snap_pauses.push(us as f64 / 1e3); // blocco con snapshot (scritto nel tick)
+                snap_rss.push((h, rss_last, Instant::now() + Duration::from_secs(60)));
+            }
+            // Campioni inclusi in questo blocco: latenza dall'invio (risoluzione ~40 ms).
+            let waiting: Vec<(Signature, Instant)> = std::mem::take(&mut *pending.lock().unwrap());
+            if !waiting.is_empty() {
+                let sigs: Vec<Signature> = waiting.iter().map(|w| w.0).collect();
+                let found = rt.block_on(gw.query(move |n: &mut Node| sigs.iter().map(|s| n.index.status(s).is_some()).collect::<Vec<_>>())).unwrap();
+                let mut back = vec![];
+                for (w, f) in waiting.into_iter().zip(found) {
+                    if f { lat.push(w.1.elapsed().as_secs_f64() * 1e3) } else { back.push(w) }
+                }
+                pending.lock().unwrap().extend(back);
             }
             last_h = h;
             *bh.lock().unwrap() = lh;
             height.store(h, Ordering::Relaxed);
         }
+        let rss = rss_mb();
+        snap_rss.retain(|&(sh, before, due)| {
+            if Instant::now() < due {
+                return true;
+            }
+            say!("snapshot all'altezza {sh}: RSS subito prima {before} MB, 1 minuto dopo {rss} MB ({:+} MB)", rss as i64 - before as i64);
+            snap_lines.push((sh, before, rss));
+            false
+        });
+        rss_last = rss;
         if t0.elapsed() < Duration::from_secs(minute * 60) {
             continue;
         }
@@ -262,8 +309,13 @@ fn main() {
             wallet_line = if good { format!("ok ({line})") } else { format!("ERRORE: {text}") };
         }
         let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
+        let cpu = cpu_ticks();
+        let d: Vec<u64> = (0..4).map(|i| cpu[i] - cpu_last[i]).collect();
+        (0..4).for_each(|i| cpu_total[i] += d[i]);
+        cpu_last = cpu;
+        let secs = 60.0; // tick a 100 Hz: % di un core = tick / secondi
         say!(
-            "| {minute} | {} | {} | {} | {:.0} | {:.1} / {:.1} / {:.1} | {} | {:.0} | {st_ok} / {exp_ok} (errori {st_bad} / {exp_bad}) | {wallet_line} |",
+            "| {minute} | {} | {} | {} | {:.0} | {:.1} / {:.1} / {:.1} | {:.0} / {:.0} / {:.0} | {:.0} / {:.0} / {:.0} / {:.0} | {} | {:.0} | {st_ok} / {exp_ok} (errori {st_bad} / {exp_bad}) | {wallet_line} |",
             s - last_sent,
             ac - last_acc,
             inc - last_inc,
@@ -271,11 +323,19 @@ fn main() {
             pct(&mut ticks, 0.5),
             pct(&mut ticks, 0.95),
             pct(&mut ticks, 0.99),
+            pct(&mut lat, 0.5),
+            pct(&mut lat, 0.95),
+            pct(&mut lat, 0.99),
+            d[0] as f64 / secs,
+            d[1] as f64 / secs,
+            d[2] as f64 / secs,
+            d[3] as f64 / secs,
             rss_mb(),
             mb(&dir.join("journal.bin")),
         );
         (last_sent, last_acc, last_inc) = (s, ac, inc);
         ticks.clear();
+        all_lat.append(&mut lat);
         wallet_line.clear();
         minute += 1;
     }
@@ -296,6 +356,28 @@ fn main() {
     say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
     say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
+    say!(
+        "invio→inclusione ({} campioni, 1 ogni ~1000 tx, risoluzione ~40 ms): p50 {:.0} / p95 {:.0} / p99 {:.0} / max {:.0} ms",
+        all_lat.len(),
+        pct(&mut all_lat, 0.5),
+        pct(&mut all_lat, 0.95),
+        pct(&mut all_lat, 0.99),
+        pct(&mut all_lat, 1.0)
+    );
+    let secs = (minute - 1).max(1) as f64 * 60.0;
+    say!(
+        "CPU media (% di un core): nodo {:.0}, rete {:.0}, client {:.0}, altro {:.0}",
+        cpu_total[0] as f64 / secs,
+        cpu_total[1] as f64 / secs,
+        cpu_total[2] as f64 / secs,
+        cpu_total[3] as f64 / secs
+    );
+    // Il salto di uno snapshot rientra se il RSS prima dello snapshot successivo torna
+    // vicino a quello prima del precedente; si accumula se riparte dal valore "dopo".
+    say!(
+        "RSS intorno agli snapshot (altezza: prima -> 1 min dopo): {}",
+        snap_lines.iter().map(|(h, b, a)| format!("{h}: {b} -> {a}")).collect::<Vec<_>>().join(", ")
+    );
     say!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
     say!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
     say!(
@@ -335,7 +417,7 @@ fn reopen(dir: &Path) {
     let load_state = t.elapsed().as_secs_f64();
     let f = std::fs::File::open(dir.join("journal.bin")).unwrap();
     let len = f.metadata().unwrap().len();
-    let (mut off, mut prep, mut load, mut tail) = (0u64, vec![], vec![], vec![]);
+    let (mut off, mut prep, mut load, mut tail, mut failed) = (0u64, vec![], vec![], vec![], 0usize);
     let all = Instant::now();
     while off + 4 <= len {
         let mut n = [0u8; 4];
@@ -350,7 +432,7 @@ fn reopen(dir: &Path) {
         let blk = centrifuga::ledger::Block::decode(&b).unwrap();
         let (bh, txs) = (blk.header.height, blk.txs.len());
         let t = Instant::now();
-        chain.apply(&blk).unwrap();
+        failed += chain.apply(&blk).unwrap().results.iter().filter(|r| r.is_err()).count();
         let ms = t.elapsed().as_secs_f64() * 1e3;
         match () {
             _ if bh <= load_from => prep.push((ms, txs)),
@@ -367,6 +449,7 @@ fn reopen(dir: &Path) {
     say!("riesecuzione completa: stato iniziale {load_state:.1} s, journal {total:.1} s (altezza {})", chain.height);
     say!("  preparazione (fino all'altezza {load_from}): {}", sum(&prep));
     say!("  carico: {}", sum(&load));
+    say!("  tx incluse ma fallite (eseguite con errore, contate rieseguendo il journal): {failed}");
     say!("  blocchi vuoti dopo l'inizio del carico (battito, coda): {}", sum(&tail));
     say!("  hash finale (blocco, stato incrementale, stato ricalcolato) {}", if same { "uguali al nodo vivo" } else { "DIVERSI" });
 }
