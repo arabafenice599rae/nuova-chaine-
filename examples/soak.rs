@@ -133,7 +133,15 @@ fn main() {
     let via_rpc = args.iter().any(|x| x == "--rpc");
     let signers_n: u64 = if via_rpc { 16 } else { SIGNERS };
     let a: Vec<u64> = args.iter().filter(|x| !x.starts_with("--")).map(|x| x.replace('_', "").parse().expect("number")).collect();
-    let (n, tps, minutes) = (a[0], a[1], a[2]);
+    let (n, tps, mut minutes) = (a[0], a[1], a[2]);
+    // Gradini (solo misure): STEPS="5000,7500,..." tx/s, STEP_MINUTES minuti ciascuno; ci si
+    // ferma dopo il primo gradino con p99 del blocco > 100 ms o tx accettate non incluse.
+    let steps: Vec<u64> = std::env::var("STEPS").map(|s| s.split(',').map(|x| x.trim().parse().expect("STEPS")).collect()).unwrap_or_default();
+    let step_minutes: u64 = std::env::var("STEP_MINUTES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    if !steps.is_empty() {
+        minutes = steps.len() as u64 * step_minutes;
+    }
+    let target = Arc::new(AtomicU64::new(steps.first().copied().unwrap_or(tps)));
     let dir = std::env::var("LOAD_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("centrifuga-soak"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -173,15 +181,17 @@ fn main() {
     let load_from = rt.block_on(gw.query(|n: &mut Node| n.chain.height)).unwrap();
     let mut signers = vec![];
     for w in 0..signers_n {
-        let (ingress, bh, height, sent, accepted, stop, samples, pending) =
-            (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone(), pending.clone());
-        let rate = tps as f64 / signers_n as f64;
+        let (ingress, bh, height, sent, accepted, stop, samples, pending, target) =
+            (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone(), pending.clone(), target.clone());
         let senders: Vec<Keypair> = (0..SENDERS).filter(|i| i % signers_n == w).map(key).collect();
         signers.push(std::thread::Builder::new().name(format!("soak-client-{w}")).spawn(move || {
-            let (start, mut done, mut k) = (Instant::now(), 0u64, w);
+            let (mut last, mut due_f, mut done, mut k) = (Instant::now(), 0f64, 0u64, w);
             while !stop.load(Ordering::Relaxed) {
-                // Ritmo: tx dovute finora, a lotti da 50.
-                let due = (start.elapsed().as_secs_f64() * rate) as u64;
+                // Ritmo: tx dovute finora (al ritmo del gradino corrente), a lotti da 50.
+                let now = Instant::now();
+                due_f += (now - last).as_secs_f64() * target.load(Ordering::Relaxed) as f64 / signers_n as f64;
+                last = now;
+                let due = due_f as u64;
                 if done >= due {
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
@@ -237,6 +247,12 @@ fn main() {
     let (mut st_ok, mut st_bad, mut exp_ok, mut exp_bad, mut wallet_ok, mut wallet_bad) = (0, 0, 0, 0, 0, 0);
     let (mut minute, mut wallet_line) = (1u64, String::new());
     let (mut lat, mut all_lat) = (vec![], vec![]);
+    // Gradino corrente: tick dei blocchi, latenze, contatori all'inizio, esito.
+    let (mut step_i, mut step_ticks, mut step_lat, mut step_from) = (0usize, vec![], vec![], (0u64, 0u64, 0u64));
+    let mut step_rows: Vec<String> = vec![];
+    if !steps.is_empty() {
+        say!("gradini: {} tx/s, {step_minutes} minuti ciascuno; stop al primo con p99 del blocco > 100 ms o tx accettate non incluse", steps.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(", "));
+    }
     let (mut cpu_last, mut cpu_total) = (cpu_ticks(), [0u64; 4]);
     // Snapshot: (altezza, RSS subito prima, istante + 60 s); poi la riga con il RSS dopo 1 minuto.
     let (mut rss_last, mut snap_rss, mut snap_lines) = (rss_mb(), Vec::<(u64, u64, Instant)>::new(), Vec::<(u64, u64, u64)>::new());
@@ -337,8 +353,44 @@ fn main() {
             mb(&dir.join("journal.bin")),
         );
         (last_sent, last_acc, last_inc) = (s, ac, inc);
+        step_ticks.extend(ticks.iter().copied());
+        step_lat.extend(lat.iter().copied());
         ticks.clear();
         all_lat.append(&mut lat);
+        if !steps.is_empty() && minute % step_minutes == 0 {
+            // Fine gradino: in coda (accettate e non ancora incluse) oltre ~2 blocchi = non incluse.
+            let rate = steps[step_i];
+            let backlog = ac.saturating_sub(inc);
+            let secs = (step_minutes * 60) as f64;
+            let (p99, inflight) = (pct(&mut step_ticks, 0.99), rate / 5);
+            let row = format!(
+                "| {rate} | {:.0} | {:.0} | {:.0} | {:.1} / {:.1} / {:.1} | {:.0} / {:.0} / {:.0} | {backlog} |",
+                (s - step_from.0) as f64 / secs,
+                (ac - step_from.1) as f64 / secs,
+                (inc - step_from.2) as f64 / secs,
+                pct(&mut step_ticks, 0.5),
+                pct(&mut step_ticks, 0.95),
+                p99,
+                pct(&mut step_lat, 0.5),
+                pct(&mut step_lat, 0.95),
+                pct(&mut step_lat, 0.99),
+            );
+            say!("gradino {rate} tx/s: {row}");
+            step_rows.push(row);
+            let failed = p99 > 100.0 || backlog > inflight;
+            step_from = (s, ac, inc);
+            step_ticks.clear();
+            step_lat.clear();
+            step_i += 1;
+            if failed || step_i == steps.len() {
+                if failed {
+                    say!("gradino {rate} tx/s: limite superato (p99 {p99:.1} ms, in coda {backlog} tx): stop");
+                }
+                minute += 1;
+                break;
+            }
+            target.store(steps[step_i], Ordering::Relaxed);
+        }
         wallet_line.clear();
         minute += 1;
     }
@@ -355,6 +407,15 @@ fn main() {
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
     let hours = t0.elapsed().as_secs_f64() / 3600.0;
     let j = mb(&dir.join("journal.bin"));
+    if !step_rows.is_empty() {
+        say!("");
+        say!("| gradino tx/s | inviate/s | accettate/s | incluse/s | blocco p50 / p95 / p99 ms | invio→inclusione p50 / p95 / p99 ms | in coda a fine gradino |");
+        say!("|---|---|---|---|---|---|---|");
+        for r in &step_rows {
+            say!("{r}");
+        }
+        say!("");
+    }
     say!("totale: inviate {s}, accettate {ac}, rifiutate all'ingresso {}, incluse {inc}, non incluse {}", s - ac, ac.saturating_sub(inc));
     say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
     say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
