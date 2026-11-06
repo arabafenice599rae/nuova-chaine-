@@ -5,3 +5,13 @@ comando: `scripts/soak-run.sh lthash-1m-5000-direct 1000000 5000 30` (commit 4b3
 macchina: 4 vCPU, Intel(R) Xeon(R) Processor @ 2.10GHz; commit 4b3128a; avvio 1793949900065 ms (unix)
 1000000 account, 5000 tx/s richiesti, 30 minuti, invio diretto all'ingresso (limite del nodo), rpc_recent_txs 20000, snapshot ogni 3000 blocchi
 | min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |
+| 1 | 300300 | 300300 | 299850 | 4998 | 11.5 / 15.2 / 18.0 | 722 | 66 | 1 / 1 (errori 0 / 0) |  |
+| 2 | 300000 | 300000 | 300000 | 5000 | 11.3 / 15.3 / 17.7 | 741 | 132 | 2 / 2 (errori 0 / 0) |  |
+| 3 | 300000 | 300000 | 300000 | 5000 | 11.6 / 15.7 / 18.5 | 760 | 197 | 3 / 3 (errori 0 / 0) |  |
+| 4 | 300000 | 300000 | 300000 | 5000 | 11.4 / 15.5 / 19.4 | 779 | 263 | 4 / 4 (errori 0 / 0) |  |
+| 5 | 304000 | 304000 | 297450 | 4958 | 12.5 / 17.2 / 22.2 | 810 | 330 | 5 / 5 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 6 | 296100 | 296100 | 302751 | 5046 | 12.3 / 16.2 / 23.1 | 821 | 395 | 6 / 6 (errori 0 / 0) |  |
+| 7 | 299900 | 299900 | 300000 | 5000 | 12.2 / 16.3 / 19.0 | 841 | 461 | 7 / 7 (errori 0 / 0) |  |
+| 8 | 300000 | 300000 | 300000 | 5000 | 12.4 / 17.0 / 20.0 | 861 | 526 | 8 / 8 (errori 0 / 0) |  |
+| 9 | 299950 | 299950 | 300050 | 5001 | 12.7 / 17.2 / 19.7 | 881 | 592 | 9 / 9 (errori 0 / 0) |  |
+| 10 | 304500 | 304500 | 297500 | 4958 | 13.3 / 18.3 / 22.0 | 923 | 659 | 10 / 10 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
