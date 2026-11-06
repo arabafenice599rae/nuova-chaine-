@@ -99,10 +99,26 @@ fn account_at(n: &Node, k: &Address, c: &Value) -> R {
     }
 }
 
+/// `returnData` come in Agave: null se il programma non ne ha scritti.
+fn return_data(m: &litesvm::types::TransactionMetadata) -> Value {
+    let r = &m.return_data;
+    if r.data.is_empty() {
+        return Value::Null;
+    }
+    json!({"programId": r.program_id.to_string(), "data": [b64(&r.data), "base64"]})
+}
+
+fn record_return_data(r: &TxRecord) -> Value {
+    match &r.return_data {
+        Some((program, data)) => json!({"programId": program.to_string(), "data": [b64(data), "base64"]}),
+        None => Value::Null,
+    }
+}
+
 fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     match n.chain.svm.simulate(tx) {
-        Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": null}),
-        Err(f) => json!({"err": f.err, "logs": f.meta.logs, "accounts": null, "unitsConsumed": f.meta.compute_units_consumed, "returnData": null}),
+        Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": return_data(&i.meta)}),
+        Err(f) => json!({"err": f.err, "logs": f.meta.logs, "accounts": null, "unitsConsumed": f.meta.compute_units_consumed, "returnData": return_data(&f.meta)}),
     }
 }
 
@@ -147,7 +163,7 @@ pub fn transaction(r: &TxRecord, c: &Value) -> Value {
         "meta": {
             "err": r.err(), "status": status, "fee": r.fee, "preBalances": r.pre, "postBalances": r.post,
             "logMessages": r.logs, "innerInstructions": [], "preTokenBalances": [], "postTokenBalances": [],
-            "rewards": [], "computeUnitsConsumed": r.compute_units,
+            "rewards": [], "computeUnitsConsumed": r.compute_units, "returnData": record_return_data(r),
             "loadedAddresses": {"writable": [], "readonly": []},
         },
     });

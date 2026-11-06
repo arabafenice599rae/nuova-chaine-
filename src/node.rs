@@ -100,8 +100,10 @@ impl Node {
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
         let height = self.chain.height + self.gap(now_ms);
         self.last_tick_ms = Some(now_ms);
-        let ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
+        let mut ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
+        let t = Instant::now();
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
+        ex.phases.journal = t.elapsed();
         let arrivals = &mut self.arrivals;
         let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
         self.index.record(&ex, |s| us.get(s).copied());
@@ -115,6 +117,8 @@ impl Node {
         if every > 0 && ex.block.header.height % every == 0 {
             self.snapshot()?;
         }
+        let p = &mut ex.phases;
+        p.other = started.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
         self.last_tick_us = started.elapsed().as_micros() as u64;
         Ok(ex)
     }
