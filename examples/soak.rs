@@ -316,7 +316,8 @@ fn main() {
         }
         let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
         let cpu = cpu_ticks();
-        let d: Vec<u64> = (0..4).map(|i| cpu[i] - cpu_last[i]).collect();
+        // saturating: un thread finito (es. quello dello snapshot) esce dal conteggio.
+        let d: Vec<u64> = (0..4).map(|i| cpu[i].saturating_sub(cpu_last[i])).collect();
         (0..4).for_each(|i| cpu_total[i] += d[i]);
         cpu_last = cpu;
         let secs = 60.0; // tick a 100 Hz: % di un core = tick / secondi
