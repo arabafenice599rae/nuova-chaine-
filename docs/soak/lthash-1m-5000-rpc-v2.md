@@ -31,3 +31,20 @@ snapshot all'altezza 6000: RSS subito prima 841 MB, 1 minuto dopo 863 MB (+22 MB
 | 22 | 300500 | 300500 | 300022 | 5000 | 15.8 / 25.9 / 30.6 | 82 / 115 / 123 | 64 / 51 / 53 / 0 | 866 | 1447 | 22 / 22 (errori 0 / 0) |  |
 | 23 | 299800 | 299800 | 299999 | 5000 | 15.1 / 25.8 / 28.9 | 80 / 113 / 120 | 60 / 49 / 50 / 0 | 866 | 1513 | 23 / 23 (errori 0 / 0) |  |
 | 24 | 299750 | 299750 | 299943 | 4999 | 14.5 / 23.8 / 27.0 | 78 / 112 / 117 | 59 / 48 / 48 / 0 | 866 | 1579 | 24 / 24 (errori 0 / 0) |  |
+| 25 | 298150 | 298150 | 297488 | 4958 | 15.1 / 25.3 / 28.7 | 80 / 113 / 119 | 61 / 49 / 49 / 0 | 867 | 1644 | 25 / 25 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 26 | 301950 | 301950 | 302323 | 5039 | 14.3 / 24.9 / 28.3 | 53 / 133 / 137 | 59 / 48 / 49 / 0 | 867 | 1711 | 26 / 26 (errori 0 / 0) |  |
+| 27 | 300350 | 300350 | 300800 | 5013 | 14.4 / 23.7 / 27.4 | 53 / 134 / 137 | 59 / 48 / 48 / 0 | 867 | 1777 | 27 / 27 (errori 0 / 0) |  |
+| 28 | 299900 | 299900 | 299201 | 4987 | 14.2 / 22.5 / 26.1 | 53 / 133 / 137 | 58 / 47 / 47 / 0 | 867 | 1842 | 28 / 28 (errori 0 / 0) |  |
+| 29 | 300100 | 300100 | 300799 | 5013 | 13.9 / 23.0 / 26.1 | 52 / 133 / 136 | 57 / 47 / 47 / 0 | 867 | 1908 | 29 / 29 (errori 0 / 0) |  |
+| 30 | 297600 | 297600 | 296802 | 4947 | 14.2 / 22.8 / 26.1 | 53 / 134 / 138 | 58 / 47 / 46 / 0 | 868 | 1973 | 30 / 30 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+totale: inviate 8999200, accettate 8999200, rifiutate all'ingresso 0, incluse 8999206, non incluse 0
+TPS effettivi medi 4997 (richiesti 5000); altezza 18013
+blocco (tutta la prova): p50 14.5 / p95 24.4 / p99 28.2 / max 840.8 ms
+RAM: all'inizio 85 MB, prima del nodo; alla fine 868 MB; stati in RAM 145601
+invio→inclusione (35984 campioni, 1 ogni ~1000 tx, risoluzione ~40 ms): p50 75 / p95 122 / p99 134 / max 972 ms
+CPU media (% di un core): nodo 59, rete 48, client 49, altro 0
+RSS intorno agli snapshot (altezza: prima -> 1 min dopo): 6000: 841 -> 863
+journal 1974 MB = 219 byte/tx, 3945 MB/ora; snapshot 91 MB; status.bin 11.4 MB
+stati: 30 trovati e 30 scaduti come atteso (errori 0 / 0); wallet sotto carico: 6 ok, 0 errori
+snapshot durante il carico: 1 (blocchi con snapshot: 841 ms), pausa massima 841 ms
+riavvio da snapshot (altezza 18000) + journal: 15.1 s, altezza 18013, hash uguali
