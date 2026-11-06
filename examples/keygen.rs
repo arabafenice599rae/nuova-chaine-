@@ -7,7 +7,7 @@ fn main() {
         match centrifuga::node::read_keypair(std::path::Path::new(&path)) {
             Ok(kp) => println!("{}", kp.pubkey()),
             Err(e) => {
-                eprintln!("errore: {e}");
+                eprintln!("error: {e}");
                 std::process::exit(1);
             }
         }

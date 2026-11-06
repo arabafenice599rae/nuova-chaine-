@@ -54,8 +54,12 @@ Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra pro
 - Genesis hash: il blocco 0 ha come `prev_hash` lo SHA-256 dei parametri di consenso
   (operatore, fee, finestra, fee mining, `slot_ms`, `heartbeat_slots`, vault): chi
   verifica con parametri diversi ottiene un altro genesis.
-- Hash di stato: SHA-256 su tutti gli account ordinati per pubkey (dietro
-  l'interfaccia `StateHasher`, sostituibile da un hasher incrementale).
+- Hash di stato: LtHash omomorfo come in Agave (`solana-lattice-hash`). È la somma
+  degli LtHash degli account; a ogni blocco si toglie il contributo precedente degli
+  account cambiati e si aggiunge il nuovo, quindi il costo dipende dagli account
+  cambiati e non da quelli totali. Nell'header va il checksum blake3 (32 byte).
+  Ricalcolo completo solo all'avvio, come verifica dello snapshot. Misure in
+  [docs/load-test.md](docs/load-test.md).
 - Blockhash = hash del blocco. Il blockhash del blocco all'altezza h vale nei blocchi
   fino all'altezza h + N (`blockhash_window`, default 300 slot = 30 s), oppure la tx
   usa un durable nonce valido. Anti-duplicati: le firme restano note per lo stesso
@@ -178,6 +182,22 @@ Hash della lista: *da pubblicare a fine fee mining* (blocco 630.720.000).
 Programmi nel genesis: System, SPL Token, Token-2022, Associated Token Account,
 Compute Budget, Memo, precompile ed25519/secp256k1 (più quelli che litesvm carica
 di default: Address Lookup Table, Stake).
+
+## Deploy di programmi
+
+`solana program deploy` (CLI Agave 4.3.2) funziona contro il nodo con `--use-rpc`:
+
+```
+solana -u https://<nodo> program deploy programma.so --use-rpc
+```
+
+Senza `--use-rpc` la CLI invia le scritture via TPU/QUIC, ricavando i leader con
+`getClusterNodes` e `getEpochSchedule`. Qui c'è un solo validatore e niente QUIC, quindi
+il deploy si ferma con "Failed to initialize LeaderTpuCacheService". Gli aggiornamenti
+usano lo stesso comando con lo stesso `--program-id`. La CI lo verifica con
+`scripts/cli-deploy.sh`: deploy, chiamata, upgrade, chiamata, riavvio del nodo e
+chiamata. `tests/step9_deploy.rs` verifica la stessa sequenza e la riesecuzione dal
+journal.
 
 ## JSON-RPC per i wallet
 

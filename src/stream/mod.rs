@@ -31,7 +31,7 @@ use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::exec::Executed;
-use crate::exec::state_hash::{FullSha256, StateHasher};
+use crate::exec::state_hash::LtState;
 use crate::ledger::{Block, Header, block::tx_bytes};
 use crate::node::{Node, Query};
 use crate::rpc::encode::b64;
@@ -219,7 +219,9 @@ pub struct Replica {
     /// deve essere quello di identità e coincidere, altrimenti il nodo è rifiutato.
     pub expected_chain: Option<(String, Hash)>,
     chain_checked: bool,
-    pub accounts: HashMap<Address, AccountSharedData>,
+    accounts: HashMap<Address, AccountSharedData>,
+    /// LtHash di `accounts`, aggiornato con i soli account ricevuti.
+    lt: LtState,
 }
 
 fn field<'a>(v: &'a Value, k: &str) -> Result<&'a Value, String> {
@@ -249,6 +251,7 @@ impl Replica {
             expected_chain: None,
             chain_checked: false,
             accounts: HashMap::new(),
+            lt: LtState::empty(),
         }
     }
 
@@ -258,8 +261,18 @@ impl Replica {
         self
     }
 
+    pub fn accounts(&self) -> &HashMap<Address, AccountSharedData> {
+        &self.accounts
+    }
+
+    /// Hash di stato (incrementale).
     pub fn state_hash(&self) -> Hash {
-        FullSha256.hash(&self.accounts, &Default::default())
+        self.lt.hash()
+    }
+
+    /// Ricalcolo completo: deve coincidere con `state_hash`.
+    pub fn full_state_hash(&self) -> Hash {
+        LtState::full(&self.accounts).hash()
     }
 
     fn apply_accounts(&mut self, list: &Value) -> Result<(), String> {
@@ -267,7 +280,8 @@ impl Replica {
             let k: Address = parse(a, "pubkey")?;
             let lamports = field(a, "lamports")?.as_u64().ok_or("lamports")?;
             if lamports == 0 {
-                self.accounts.remove(&k);
+                let old = self.accounts.remove(&k);
+                self.lt.replace(&k, old.as_ref(), None);
                 continue;
             }
             let data = decode64(field(a, "data")?.as_str().ok_or("data")?)?;
@@ -275,6 +289,7 @@ impl Replica {
             acc.set_data_from_slice(&data);
             acc.set_executable(field(a, "executable")?.as_bool().ok_or("executable")?);
             acc.set_rent_epoch(field(a, "rent_epoch")?.as_u64().ok_or("rent_epoch")?);
+            self.lt.replace(&k, self.accounts.get(&k), Some(&acc));
             self.accounts.insert(k, acc);
         }
         Ok(())
@@ -364,6 +379,7 @@ impl Replica {
                 }
                 if full {
                     self.accounts.clear();
+                    self.lt = LtState::empty();
                     self.needs_full = false;
                 }
                 self.apply_accounts(field(&v, "accounts")?)?;

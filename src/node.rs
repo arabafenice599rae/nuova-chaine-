@@ -70,7 +70,7 @@ impl Node {
             last_offset = Some(offset);
             if b.header.height <= snap_height {
                 if b.header.height == snap_height {
-                    let h = chain.state_hash(&Default::default());
+                    let h = chain.state_hash();
                     if h != b.header.state_hash {
                         return Err(format!("snapshot {snap_height}: state hash differs from the journal"));
                     }
@@ -100,11 +100,14 @@ impl Node {
 
     /// Produce il blocco successivo: preleva in ordine FIFO, esegue, firma, scrive nel journal.
     pub fn tick(&mut self, now_ms: u64) -> Result<Executed, String> {
+        let start = Instant::now();
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
         let height = self.chain.height + self.gap(now_ms);
         self.last_tick_ms = Some(now_ms);
-        let ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
+        let mut ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
+        let t = Instant::now();
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
+        ex.phases.journal = t.elapsed();
         self.index.record(&ex);
         for tx in &ex.block.txs {
             if let Some(t) = self.arrivals.remove(&tx.signatures[0]) {
@@ -123,6 +126,8 @@ impl Node {
         if every > 0 && ex.block.header.height % every == 0 {
             self.snapshot()?;
         }
+        let p = &mut ex.phases;
+        p.other = start.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
         Ok(ex)
     }
 

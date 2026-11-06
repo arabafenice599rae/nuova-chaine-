@@ -106,7 +106,26 @@ fn parsed(svm: &Svm, a: &AccountSharedData) -> Option<Value> {
     Some(json!({"program": program, "parsed": {"type": kind, "info": info}, "space": d.len()}))
 }
 
-/// Oggetto account. `enc`: base64 | base58 | jsonParsed | assente (= base58 legacy).
+/// Frame zstd valido (RFC 8878) con blocchi "raw", cioè senza compressione:
+/// la CLI Solana chiede `base64+zstd` e qualsiasi decoder zstd lo accetta.
+pub fn zstd_raw(d: &[u8]) -> Vec<u8> {
+    const MAX_BLOCK: usize = 128 * 1024;
+    let mut out = vec![0x28, 0xB5, 0x2F, 0xFD, 0xE0]; // magic; single segment, dimensione su 8 byte
+    out.extend_from_slice(&(d.len() as u64).to_le_bytes());
+    let mut chunks: Vec<&[u8]> = d.chunks(MAX_BLOCK).collect();
+    if chunks.is_empty() {
+        chunks.push(&[]);
+    }
+    let last = chunks.len() - 1;
+    for (i, c) in chunks.into_iter().enumerate() {
+        let header = ((c.len() as u32) << 3) | (i == last) as u32; // tipo 0 = raw
+        out.extend_from_slice(&header.to_le_bytes()[..3]);
+        out.extend_from_slice(c);
+    }
+    out
+}
+
+/// Oggetto account. `enc`: base64 | base64+zstd | base58 | jsonParsed | assente (= base58 legacy).
 pub fn account(svm: &Svm, a: &AccountSharedData, enc: Option<&str>, slice: Option<(usize, usize)>) -> Result<Value, String> {
     let full = a.data();
     let d = match slice {
@@ -117,6 +136,7 @@ pub fn account(svm: &Svm, a: &AccountSharedData, enc: Option<&str>, slice: Optio
         None | Some("binary") => json!(b58(d)),
         Some("base58") => json!([b58(d), "base58"]),
         Some("base64") => json!([b64(d), "base64"]),
+        Some("base64+zstd") => json!([b64(&zstd_raw(d)), "base64+zstd"]),
         Some("jsonParsed") => parsed(svm, a).unwrap_or_else(|| json!([b64(d), "base64"])),
         Some(e) => return Err(format!("unsupported encoding: {e}")),
     };
