@@ -99,9 +99,17 @@ impl Params {
             d.update(s.as_bytes());
         }
         d.update([id.decimals]);
+        // Schema dell'hash di stato: entra nel genesis hash (stesso stato, schema diverso =
+        // chain diversa).
+        d.update((STATE_HASH_SCHEME.len() as u32).to_le_bytes());
+        d.update(STATE_HASH_SCHEME.as_bytes());
         Hash::new_from_array(d.finalize().into())
     }
 }
+
+/// Hash di stato nel consenso: LtHash di Agave (somma degli LtHash degli account con
+/// blake3, checksum blake3 nell'header).
+pub const STATE_HASH_SCHEME: &str = "lthash-blake3-v1";
 
 /// Vault che il nodo muove direttamente (regole di fee nel nodo).
 #[derive(Clone, Debug)]
@@ -251,6 +259,11 @@ impl Chain {
             let v = self.svm.get(&k).cloned();
             self.pre.insert(k, v);
         }
+    }
+
+    /// Spazio per `n` firme nella finestra anti-duplicati (evita i ridimensionamenti).
+    pub fn reserve_signatures(&mut self, n: usize) {
+        self.seen.reserve(n.saturating_sub(self.seen.len()));
     }
 
     fn push_window(&mut self, height: u64, h: Hash, sigs: Vec<Signature>) {

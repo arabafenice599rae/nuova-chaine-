@@ -6,13 +6,12 @@ mainnet c'è una sezione apposta, da eseguire una sola volta.
 ## Ogni release
 
 1. **Certificati radice**: aggiornare `webpki-roots` all'ultima versione, così le CA
-   pubbliche usate dal wallet (HTTPS) non invecchiano:
+   pubbliche usate dal wallet (HTTPS) non invecchiano. La versione è fissata esatta in
+   `Cargo.toml` (`webpki-roots = "=X.Y.Z"`, come `rustls`): si cambia lì, poi
    ```sh
    cargo update -p webpki-roots
-   git diff Cargo.lock      # nuova versione di webpki-roots (o nessun cambio)
+   git diff Cargo.toml Cargo.lock   # solo webpki-roots
    ```
-   Se c'è una nuova versione *major*, va aggiornato il requisito in `Cargo.toml`,
-   poi si ripete il comando.
 2. **Avvisi di terze parti**: rigenerare `THIRD_PARTY_NOTICES` (la CI fallisce se il
    file non corrisponde a `Cargo.lock`):
    ```sh

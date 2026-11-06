@@ -51,7 +51,9 @@ Lo script, in ordine:
    prefinanziati (più 10 CnFA al faucet), `rpc_log = true` e RPC e stream in
    ascolto solo su `127.0.0.1`;
 5. verifica il genesis (conservazione e determinismo);
-6. installa e avvia il servizio systemd `centrifuga`;
+6. installa e avvia i servizi systemd `centrifuga` (nodo) e `centrifuga-indexer`
+   (storico: legge il journal del nodo; il nodo con `indexer_rpc` gli inoltra
+   `getSignaturesForAddress` e le tx vecchie, vedi docs/history.md);
 7. configura Caddy: HTTPS con Let's Encrypt; WebSocket sulla stessa porta (upgrade
    instradati al nodo); stream su `/stream`; l'IP reale passa in `X-Forwarded-For`;
 8. controlla che `https://rpc.example.org/health` risponda.
@@ -65,6 +67,7 @@ Comandi utili sul VPS:
 ```sh
 systemctl status centrifuga caddy
 journalctl -u centrifuga -f                      # blocchi con transazioni, errori
+journalctl -u centrifuga-indexer -f              # storico: altezza raggiunta, errori
 centrifuga balance <tuo indirizzo>               # "100 CnFA"
 ```
 

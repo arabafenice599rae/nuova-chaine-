@@ -77,8 +77,8 @@ KEYGEN="$SRC/target/release/examples/keygen"
 
 if [ "$RESET" = 1 ]; then
   log "--reset: cancello config e dati della chain (le chiavi restano)"
-  [ "$SYSTEM" = 1 ] && systemctl stop centrifuga 2> /dev/null || true
-  rm -rf "$VAR/data" "$CFG"
+  [ "$SYSTEM" = 1 ] && systemctl stop centrifuga centrifuga-indexer 2> /dev/null || true
+  rm -rf "$VAR/data" "$VAR/indexer" "$CFG"
 fi
 
 log "chiavi (generate qui, mai stampate)"
@@ -116,6 +116,13 @@ else
   mv "$CFG.tmp" "$CFG" && chmod 644 "$CFG"
 fi
 
+# Storico: indexer separato sulla stessa macchina (anche per config già esistenti).
+if ! grep -q '^\[indexer\]' "$CFG"; then
+  log "indexer dello storico"
+  sed -i -e '/^# indexer_rpc = /d' -e '/^\[node\]/a indexer_rpc = "http://127.0.0.1:8903"' "$CFG"
+  printf '\n[indexer]\ndata_dir = "%s/indexer"\nrpc_addr = "127.0.0.1:8903"\n' "$VAR" >> "$CFG"
+fi
+
 log "verifica del genesis (conservazione e determinismo)"
 "$BIN/centrifuga" genesis "$CFG"
 
@@ -143,9 +150,15 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 UNIT
   chmod 644 /etc/systemd/system/centrifuga.service
+  # Indexer: processo separato, legge il journal del nodo; il nodo non dipende da lui.
+  sed -e 's/^Description=.*/Description=centrifuga devnet: indexer dello storico/' \
+      -e "s|^ExecStart=.*|ExecStart=$BIN/centrifuga indexer $CFG|" \
+      /etc/systemd/system/centrifuga.service > /etc/systemd/system/centrifuga-indexer.service
+  chmod 644 /etc/systemd/system/centrifuga-indexer.service
   systemctl daemon-reload
-  systemctl enable centrifuga > /dev/null
+  systemctl enable centrifuga centrifuga-indexer > /dev/null
   systemctl restart centrifuga
+  systemctl restart centrifuga-indexer
 
   log "HTTPS con Caddy e Let's Encrypt"
   TLS_LINE="	# certificato Let's Encrypt automatico"

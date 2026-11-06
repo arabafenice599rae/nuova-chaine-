@@ -9,7 +9,11 @@
 //!
 //! Connessione: `ws://host:porta/?from_height=h`. Senza `from_height` (o con 0) il
 //! client riceve lo stato completo; con h riceve i blocchi h.. dal journal più un
-//! delta cumulativo, se h è nella finestra `stream_catchup_blocks`.
+//! delta cumulativo, se h è nella finestra del recupero (`stream_catchup_blocks` e
+//! `stream_catchup_bytes`, vale il primo limite). Fuori dalla finestra riceve
+//! `{"type":"error","code":"from_height_out_of_window","oldest":H,...}` e la chiusura
+//! (1008): si riconnette senza `from_height` e riparte dallo stato completo
+//! (`Replica::resume_height` lo fa da sé).
 //! Un account con 0 lamport è cancellato. Il nodo non aspetta mai i client: chi
 //! resta indietro di più di `stream_max_lag_blocks` viene disconnesso.
 
@@ -100,12 +104,23 @@ struct Catchup {
     offsets: Vec<u64>,
     full: bool,
     accounts: Accounts,
+    /// `from_height` fuori dalla finestra: altezza più vecchia recuperabile (None = finestra vuota).
+    out_of_window: Option<Option<u64>>,
 }
+
+/// Codice dell'errore per un `from_height` fuori dalla finestra del recupero.
+pub const OUT_OF_WINDOW: &str = "from_height_out_of_window";
 
 fn catchup(n: &Node, from: u64) -> Option<Catchup> {
     let height = n.chain.height;
     let last = n.last_offset?; // altezza 0: nessun blocco a cui ancorare lo stato
     let in_window = from > 0 && n.recent.front().is_some_and(|r| r.0 <= from);
+    let chain = json!({"type": "chain", "chainId": n.chain.params.identity.chain_id, "genesisHash": n.chain.genesis_hash.to_string()});
+    let journal = n.journal_path();
+    if from > 0 && from <= height && !in_window {
+        let oldest = Some(n.recent.front().map(|r| r.0));
+        return Some(Catchup { chain: chain.to_string(), height, journal, offsets: vec![], full: false, accounts: vec![], out_of_window: oldest });
+    }
     let (offsets, full, accounts) = if from > height {
         (vec![], false, vec![])
     } else if in_window {
@@ -116,8 +131,7 @@ fn catchup(n: &Node, from: u64) -> Option<Catchup> {
         let all = n.chain.svm.accounts().iter().map(|(k, a)| (*k, Some(a.clone()))).collect();
         (vec![last], true, all)
     };
-    let chain = json!({"type": "chain", "chainId": n.chain.params.identity.chain_id, "genesisHash": n.chain.genesis_hash.to_string()});
-    Some(Catchup { chain: chain.to_string(), height, journal: n.journal_path(), offsets, full, accounts })
+    Some(Catchup { chain: chain.to_string(), height, journal, offsets, full, accounts, out_of_window: None })
 }
 
 pub async fn serve(s: Stream, addr: SocketAddr) -> std::io::Result<()> {
@@ -157,6 +171,15 @@ async fn conn(s: Stream, c: tokio::net::TcpStream) {
         return;
     };
     let height = cu.height;
+    if let Some(oldest) = cu.out_of_window {
+        let message = "from_height outside the catch-up window: reconnect without from_height for a full state";
+        let err = json!({"type": "error", "code": OUT_OF_WINDOW, "from_height": from, "oldest": oldest, "height": height, "message": message});
+        let _ = tx.send(Message::text(cu.chain)).await;
+        let _ = tx.send(Message::text(err.to_string())).await;
+        let frame = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1008.into(), reason: OUT_OF_WINDOW.into() };
+        let _ = tx.send(Message::Close(Some(frame))).await;
+        return;
+    }
     let msgs = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
         let mut f = std::fs::File::open(&cu.journal).map_err(|e| e.to_string())?;
         let mut out = vec![cu.chain];
@@ -210,6 +233,8 @@ pub struct Replica {
     last_state: Hash,
     /// Nuova ancora non contigua (recupero oltre la finestra): serve uno stato completo.
     needs_full: bool,
+    /// Il nodo ha rifiutato `from_height` (fuori finestra): ripartire dallo stato completo.
+    resync: bool,
     last_ts: u64,
     /// Regole di altezza e timestamp del genesis.
     pub rules: crate::exec::Rules,
@@ -245,6 +270,7 @@ impl Replica {
             last_hash: Hash::default(),
             last_state: Hash::default(),
             needs_full: false,
+            resync: false,
             last_ts: 0,
             rules,
             max_future_ms: Some(5_000),
@@ -259,6 +285,12 @@ impl Replica {
     pub fn expect_chain(mut self, chain_id: &str, genesis_hash: Hash) -> Replica {
         self.expected_chain = Some((chain_id.to_string(), genesis_hash));
         self
+    }
+
+    /// `from_height` per la prossima connessione: 0 (stato completo) all'inizio o dopo un
+    /// rifiuto per finestra superata, altrimenti il blocco successivo all'ultimo applicato.
+    pub fn resume_height(&self) -> u64 {
+        if self.resync || (self.height == 0 && self.last_hash == Hash::default()) { 0 } else { self.height + 1 }
     }
 
     pub fn accounts(&self) -> &HashMap<Address, AccountSharedData> {
@@ -320,6 +352,14 @@ impl Replica {
             return Err("chain identity missing: the node did not declare it".into());
         }
         match kind {
+            // Rifiuto del nodo: la prossima connessione chiede lo stato completo.
+            Some("error") => {
+                let code = v.get("code").and_then(Value::as_str).unwrap_or("");
+                if code == OUT_OF_WINDOW {
+                    self.resync = true;
+                }
+                Err(format!("node error {code}: {}", v.get("message").and_then(Value::as_str).unwrap_or("")))
+            }
             Some("block") => {
                 let h = field(&v, "header")?;
                 let header = Header {
@@ -381,6 +421,7 @@ impl Replica {
                     self.accounts.clear();
                     self.lt = LtState::empty();
                     self.needs_full = false;
+                    self.resync = false;
                 }
                 self.apply_accounts(field(&v, "accounts")?)?;
                 self.check_state()

@@ -166,7 +166,7 @@ fn rpc_tps(mut cfg: Config, op: &Keypair, senders: &[Keypair], n: u64, bh: solan
     std::thread::sleep(std::time::Duration::from_millis(500));
     let enc = |t: &solana_transaction::versioned::VersionedTransaction| base64::engine::general_purpose::STANDARD.encode(wincode::serialize(t).unwrap());
     let raws: Vec<String> = (0..count).map(|i| enc(&transfer_tx(&senders[(i as usize) % SENDERS], &addr((i * 7919) % n.max(1)), 1_000 + i, bh))).collect();
-    let indexed = || rt.block_on(gw.query(|nd: &mut Node| nd.index.by_sig.len())).unwrap();
+    let indexed = || rt.block_on(gw.query(|nd: &mut Node| nd.index.count as usize)).unwrap();
     let base = indexed();
     let url = "http://127.0.0.1:19300";
     // Tid del thread del nodo: letto dal thread stesso.

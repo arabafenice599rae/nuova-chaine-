@@ -91,7 +91,7 @@ async fn conn(s: TcpStream, gw: Gateway) {
                 if method == "signatureSubscribe" {
                     if let Some(Sub::Signature(s)) = subs.get(&next_id) {
                         let s = *s;
-                        let done = gw.query(move |n| n.index.by_sig.get(&s).map(|r| (r.slot, json!(r.err())))).await.flatten();
+                        let done = gw.query(move |n| n.index.status(&s).map(|(slot, err)| (*slot, json!(err)))).await.flatten();
                         if let Some((slot, err)) = done {
                             subs.remove(&next_id);
                             let _ = tx.send(notification("signatureNotification", next_id, slot, json!({"err": err}))).await;

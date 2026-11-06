@@ -168,7 +168,14 @@ impl Wallet {
 
     fn history(&self, addr: Option<&str>) -> Result<(), String> {
         let (url, owner) = (self.node()?, self.owner(addr)?);
-        let r = self.call(&url, "getSignaturesForAddress", json!([owner.to_string(), {"limit": 10}]))?;
+        let r = self.call(&url, "getSignaturesForAddress", json!([owner.to_string(), {"limit": 10}])).map_err(|e| {
+            // Errore del nodo senza storico: si mostra il suo motivo (indexer assente o irraggiungibile).
+            let v: serde_json::Value = e.split_once(": ").and_then(|(_, j)| serde_json::from_str(j).ok()).unwrap_or_default();
+            match v["code"].as_i64() {
+                Some(crate::rpc::methods::NO_HISTORY) => format!("history not available on this node: {}", v["message"].as_str().unwrap_or("")),
+                _ => e,
+            }
+        })?;
         let list = r.as_array().cloned().unwrap_or_default();
         if list.is_empty() {
             say("no transactions");

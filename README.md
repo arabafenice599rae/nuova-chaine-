@@ -54,9 +54,10 @@ Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra pro
 - Genesis hash: il blocco 0 ha come `prev_hash` lo SHA-256 dei parametri di consenso
   (operatore, fee, finestra, fee mining, `slot_ms`, `heartbeat_slots`, vault): chi
   verifica con parametri diversi ottiene un altro genesis.
-- Hash di stato: LtHash omomorfo come in Agave (`solana-lattice-hash`). È la somma
-  degli LtHash degli account; a ogni blocco si toglie il contributo precedente degli
-  account cambiati e si aggiunge il nuovo, quindi il costo dipende dagli account
+- Hash di stato: LtHash omomorfo come in Agave (`solana-lattice-hash`, schema
+  `lthash-blake3-v1`, che entra nei parametri di consenso e quindi nel genesis hash). È
+  la somma degli LtHash degli account; a ogni blocco si toglie il contributo precedente
+  degli account cambiati e si aggiunge il nuovo, quindi il costo dipende dagli account
   cambiati e non da quelli totali. Nell'header va il checksum blake3 (32 byte).
   Ricalcolo completo solo all'avvio, come verifica dello snapshot. Misure in
   [docs/load-test.md](docs/load-test.md).
@@ -251,9 +252,14 @@ L'API principale per bot e repliche (`src/stream/`): WebSocket su `stream_addr`
   blocco, di ogni account cambiato (`lamports: 0` = cancellato).
 - `ws://host:8901/?from_height=h`: il client riceve dal **journal** i blocchi da h
   in poi (solo header e corpo) e poi `{"type":"sync","full":false,"accounts":[...]}`
-  con il valore attuale di ogni account cambiato da h, se h è negli ultimi
-  `stream_catchup_blocks` blocchi; altrimenti (o senza `from_height`) lo stato
-  completo (`"full":true`) ancorato all'ultimo blocco.
+  con il valore attuale di ogni account cambiato da h, se h è nella finestra del
+  recupero: ultimi `stream_catchup_blocks` blocchi e al massimo `stream_catchup_bytes`
+  (default 128 MB) di indirizzi in RAM, vale il primo limite raggiunto. Senza
+  `from_height` riceve lo stato completo (`"full":true`) ancorato all'ultimo blocco.
+- `from_height` fuori dalla finestra: `{"type":"error","code":"from_height_out_of_window",
+  "oldest":H,...}` e chiusura 1008. Il client si riconnette senza `from_height` e
+  riparte dallo stato completo; `Replica::resume_height()` restituisce già 0 dopo
+  l'errore (test `replica_in_and_out_of_byte_window`).
 - Il client verifica la firma dell'operatore, la continuità `prev_hash` e l'hash di
   stato (a ogni blocco live e dopo ogni sync). `stream::Replica` fa tutto questo: il
   test `replica_rebuilds_state_from_stream_only` ricostruisce lo stato solo dallo

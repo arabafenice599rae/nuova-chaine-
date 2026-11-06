@@ -37,6 +37,7 @@ pub fn chain_info(n: &Node) -> Value {
     })
 }
 
+#[derive(Debug)]
 pub struct RpcError {
     pub code: i64,
     pub message: String,
@@ -107,6 +108,13 @@ fn return_data(m: &litesvm::types::TransactionMetadata) -> Value {
     json!({"programId": r.program_id.to_string(), "data": [b64(&r.data), "base64"]})
 }
 
+fn record_return_data(r: &TxRecord) -> Value {
+    match &r.return_data {
+        Some((program, data)) => json!({"programId": program.to_string(), "data": [b64(data), "base64"]}),
+        None => Value::Null,
+    }
+}
+
 fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     match n.chain.svm.simulate(tx) {
         Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": return_data(&i.meta)}),
@@ -114,19 +122,32 @@ fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     }
 }
 
-fn status(r: &TxRecord) -> Value {
-    let status = match r.err() {
+pub fn status(slot: u64, err: Option<&solana_transaction::TransactionError>) -> Value {
+    let status = match err {
         Some(e) => json!({"Err": e}),
         None => json!({"Ok": null}),
     };
-    json!({"slot": r.slot, "confirmations": null, "err": r.err(), "status": status, "confirmationStatus": "finalized"})
+    json!({"slot": slot, "confirmations": null, "err": err, "status": status, "confirmationStatus": "finalized"})
 }
 
-fn transaction(r: &TxRecord, c: &Value) -> Value {
-    let meta = match &r.result {
-        Ok(m) => m,
-        Err(f) => &f.meta,
-    };
+/// Errore per lo storico assente (codice proprio, il wallet lo riconosce).
+pub const NO_HISTORY: i64 = -32011;
+
+pub fn history_json(list: Vec<crate::archive::HistoryEntry>) -> Value {
+    json!(list.into_iter().map(|r| json!({
+        "signature": r.sig.to_string(), "slot": r.slot, "err": r.err, "memo": null,
+        "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
+    })).collect::<Vec<_>>())
+}
+
+/// (limit, before, until) di getSignaturesForAddress.
+pub fn history_args(p: &Value) -> Result<(usize, Option<Signature>, Option<Signature>), RpcError> {
+    let c = cfg(p, 1);
+    let limit = c["limit"].as_u64().unwrap_or(1000).min(1000) as usize;
+    Ok((limit, c["before"].as_str().map(sig).transpose()?, c["until"].as_str().map(sig).transpose()?))
+}
+
+pub fn transaction(r: &TxRecord, c: &Value) -> Value {
     let tx = match c["encoding"].as_str() {
         Some("base64") => json!([b64(crate::ledger::block::tx_bytes(&r.tx)), "base64"]),
         Some("base58") => json!([b58(crate::ledger::block::tx_bytes(&r.tx)), "base58"]),
@@ -140,9 +161,9 @@ fn transaction(r: &TxRecord, c: &Value) -> Value {
     let mut out = json!({
         "slot": r.slot, "blockTime": r.time_ms / 1000, "version": encode::version(&r.tx.message), "transaction": tx,
         "meta": {
-            "err": r.err(), "status": status, "fee": meta.fee, "preBalances": r.pre, "postBalances": r.post,
-            "logMessages": meta.logs, "innerInstructions": [], "preTokenBalances": [], "postTokenBalances": [],
-            "rewards": [], "computeUnitsConsumed": meta.compute_units_consumed, "returnData": return_data(meta),
+            "err": r.err(), "status": status, "fee": r.fee, "preBalances": r.pre, "postBalances": r.post,
+            "logMessages": r.logs, "innerInstructions": [], "preTokenBalances": [], "postTokenBalances": [],
+            "rewards": [], "computeUnitsConsumed": r.compute_units, "returnData": record_return_data(r),
             "loadedAddresses": {"writable": [], "readonly": []},
         },
     });
@@ -171,7 +192,7 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         // Nessuna epoca: epoch 0 e slotsInEpoch = massimo intero sicuro in JavaScript.
         "getEpochInfo" => json!({
             "absoluteSlot": height, "blockHeight": height, "epoch": 0, "slotIndex": height,
-            "slotsInEpoch": 9_007_199_254_740_991u64, "transactionCount": n.index.by_sig.len(),
+            "slotsInEpoch": 9_007_199_254_740_991u64, "transactionCount": n.index.count,
         }),
         "getLatestBlockhash" => {
             let last_valid = height + n.chain.params.blockhash_window as u64;
@@ -264,38 +285,24 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             return Err(RpcError { code: -32003, message: message.into(), data: Value::Null });
         }
         "getSignatureStatuses" => {
+            // Finestra dei blockhash; con searchTransactionHistory il gateway completa i
+            // mancanti dall'indexer, se c'è.
             let sigs: Vec<String> = arg(p, 0)?;
-            let v = sigs.iter().map(|s| Ok(n.index.by_sig.get(&sig(s)?).map(status))).collect::<Result<Vec<_>, RpcError>>()?;
+            let v = sigs.iter().map(|s| Ok(n.index.status(&sig(s)?).map(|(slot, err)| status(*slot, err.as_ref())))).collect::<Result<Vec<_>, RpcError>>()?;
             ctx(n, json!(v))
         }
         "getTransaction" => {
             let s = sig(&arg::<String>(p, 0)?)?;
-            n.index.by_sig.get(&s).map_or(Value::Null, |r| transaction(r, cfg(p, 1)))
+            n.index.get(&s).map_or(Value::Null, |r| transaction(r, cfg(p, 1)))
         }
         "getSignaturesForAddress" => {
-            let a = addr(p, 0)?;
-            let c = cfg(p, 1);
-            let limit = c["limit"].as_u64().unwrap_or(1000).min(1000) as usize;
-            let before = c["before"].as_str().map(sig).transpose()?;
-            let until = c["until"].as_str().map(sig).transpose()?;
-            let list = n.index.by_addr.get(&a).map_or(&[][..], |v| v.as_slice());
-            let mut out = Vec::new();
-            let mut started = before.is_none();
-            for s in list.iter().rev() {
-                if !started {
-                    started = Some(*s) == before;
-                    continue;
-                }
-                if Some(*s) == until || out.len() == limit {
-                    break;
-                }
-                let r = &n.index.by_sig[s];
-                out.push(json!({
-                    "signature": s.to_string(), "slot": r.slot, "err": r.err(), "memo": null,
-                    "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
-                }));
-            }
-            json!(out)
+            // Con un indexer configurato la richiesta non arriva qui (la inoltra il gateway).
+            addr(p, 0)?;
+            return Err(RpcError {
+                code: NO_HISTORY,
+                message: "transaction history not available: this node keeps only recent transactions and has no indexer (indexer_rpc)".into(),
+                data: Value::Null,
+            });
         }
         _ => {
             return Err(RpcError { code: -32601, message: "Method not found".into(), data: Value::Null });

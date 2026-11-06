@@ -53,6 +53,8 @@ pub fn vault_data(kind: u8, beneficiary: &Address, authority: &Address, total: u
 pub struct Config {
     pub node: NodeConfig,
     pub genesis: GenesisConfig,
+    #[serde(default)]
+    pub indexer: Option<IndexerConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -73,11 +75,39 @@ pub struct NodeConfig {
     pub stream_addr: String,
     /// Un client dello stream indietro di più blocchi di così viene disconnesso.
     pub stream_max_lag_blocks: usize,
-    /// Blocchi recuperabili con `from_height` come delta; oltre, stato completo.
+    /// Blocchi recuperabili con `from_height` come delta. Oltre (o oltre
+    /// `stream_catchup_bytes`) il client riceve un errore e riparte dallo stato completo.
     pub stream_catchup_blocks: usize,
+    /// Limite in byte della stessa finestra (indirizzi degli account cambiati in RAM).
+    #[serde(default = "default_stream_catchup_bytes")]
+    pub stream_catchup_bytes: usize,
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
+    /// Tx recenti in RAM per getTransaction (gli stati coprono sempre la finestra dei blockhash).
+    #[serde(default = "default_rpc_recent_txs")]
+    pub rpc_recent_txs: usize,
+    /// Indexer dello storico (es. "http://127.0.0.1:8903"): getSignaturesForAddress e le tx
+    /// più vecchie vanno lì. Senza, il nodo risponde che lo storico non è disponibile.
+    #[serde(default)]
+    pub indexer_rpc: Option<String>,
+}
+
+/// `centrifuga indexer`: processo separato che legge il journal del nodo, riesegue i
+/// blocchi e serve lo storico. Il nodo non dipende da lui.
+#[derive(Clone, Debug, Deserialize)]
+pub struct IndexerConfig {
+    pub data_dir: PathBuf,
+    pub rpc_addr: String,
+    /// Blocchi da conservare (0 = tutti).
+    #[serde(default)]
+    pub retention_blocks: u64,
+    /// Tx per segmento (archivio "segments").
+    #[serde(default = "default_segment_txs")]
+    pub segment_txs: u64,
+    /// Checkpoint dell'archivio e snapshot dello stato dell'indexer, in blocchi.
+    #[serde(default = "default_indexer_snapshot")]
+    pub snapshot_every: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -269,4 +299,20 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn default_stream_catchup_bytes() -> usize {
+    128 << 20
+}
+
+fn default_rpc_recent_txs() -> usize {
+    20_000
+}
+
+fn default_segment_txs() -> u64 {
+    1_000_000
+}
+
+fn default_indexer_snapshot() -> u64 {
+    3_000
 }

@@ -1,0 +1,66 @@
+# soak lthash-1m-5000-rpc-v2
+
+comando: `scripts/soak-run.sh lthash-1m-5000-rpc-v2 1000000 5000 30 --rpc` (commit 4a1596b)
+
+macchina: 4 vCPU, Intel(R) Xeon(R) Processor @ 2.10GHz; commit 4a1596b; avvio 1793954919304 ms (unix)
+1000000 account, 5000 tx/s richiesti, 30 minuti, invio via HTTP/JSON-RPC (end-to-end), rpc_recent_txs 20000, snapshot ogni 3000 blocchi, stream_catchup_blocks 36000
+CPU in % di un core: nodo = thread dei blocchi; rete = runtime tokio (RPC e stream, lato nodo); client = thread che firmano e inviano (in modalità diretta includono la verifica delle firme all'ingresso)
+| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | invio→inclusione p50 / p95 / p99 ms | CPU nodo / rete / client / altro % | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |
+| 1 | 300700 | 300700 | 300760 | 5013 | 12.7 / 19.8 / 24.9 | 66 / 128 / 137 | 55 / 46 / 46 / 0 | 723 | 66 | 1 / 1 (errori 0 / 0) |  |
+| 2 | 300100 | 300100 | 299454 | 4991 | 13.8 / 23.7 / 26.9 | 64 / 130 / 862 | 57 / 48 / 48 / 0 | 743 | 132 | 2 / 2 (errori 0 / 0) |  |
+| 3 | 300000 | 300000 | 299967 | 4999 | 14.0 / 23.0 / 27.1 | 75 / 109 / 117 | 58 / 49 / 49 / 0 | 762 | 197 | 3 / 3 (errori 0 / 0) |  |
+| 4 | 299600 | 299600 | 299995 | 5000 | 14.6 / 25.1 / 28.1 | 77 / 111 / 117 | 62 / 51 / 52 / 0 | 782 | 263 | 4 / 4 (errori 0 / 0) |  |
+| 5 | 297650 | 297650 | 297188 | 4953 | 14.3 / 24.1 / 27.1 | 76 / 109 / 115 | 61 / 49 / 50 / 0 | 808 | 329 | 5 / 5 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 6 | 302750 | 302750 | 302817 | 5047 | 14.7 / 24.7 / 26.9 | 76 / 111 / 116 | 61 / 50 / 50 / 0 | 819 | 395 | 6 / 6 (errori 0 / 0) |  |
+| 7 | 300000 | 300000 | 300048 | 5001 | 14.5 / 24.8 / 27.3 | 75 / 109 / 115 | 60 / 49 / 49 / 0 | 838 | 461 | 7 / 7 (errori 0 / 0) |  |
+| 8 | 300000 | 300000 | 299993 | 5000 | 14.5 / 23.9 / 27.2 | 75 / 108 / 113 | 60 / 49 / 49 / 0 | 840 | 526 | 8 / 8 (errori 0 / 0) |  |
+| 9 | 300000 | 300000 | 299951 | 4999 | 14.0 / 23.7 / 26.5 | 76 / 110 / 171 | 58 / 48 / 48 / 0 | 841 | 592 | 9 / 9 (errori 0 / 0) |  |
+| 10 | 296800 | 296800 | 296628 | 4944 | 14.5 / 23.6 / 26.1 | 75 / 108 / 114 | 59 / 48 / 48 / 0 | 863 | 657 | 10 / 10 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 11 | 302900 | 302900 | 303822 | 5064 | 14.9 / 24.2 / 26.9 | 91 / 126 / 131 | 60 / 49 / 49 / 0 | 863 | 724 | 11 / 11 (errori 0 / 0) |  |
+snapshot all'altezza 6000: RSS subito prima 841 MB, 1 minuto dopo 863 MB (+22 MB)
+| 12 | 300050 | 300050 | 300033 | 5001 | 14.2 / 22.3 / 30.4 | 91 / 125 / 131 | 57 / 47 / 47 / 0 | 864 | 790 | 12 / 12 (errori 0 / 0) |  |
+| 13 | 300000 | 300000 | 300016 | 5000 | 14.6 / 23.9 / 26.7 | 93 / 126 / 130 | 58 / 48 / 48 / 0 | 864 | 855 | 13 / 13 (errori 0 / 0) |  |
+| 14 | 300050 | 300050 | 300021 | 5000 | 14.6 / 24.1 / 32.5 | 92 / 126 / 132 | 58 / 48 / 48 / 0 | 865 | 921 | 14 / 14 (errori 0 / 0) |  |
+| 15 | 297050 | 297050 | 296158 | 4936 | 14.4 / 23.0 / 27.1 | 93 / 126 / 130 | 58 / 47 / 46 / 0 | 865 | 986 | 15 / 15 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 16 | 303050 | 303050 | 303472 | 5058 | 13.8 / 22.8 / 26.0 | 85 / 119 / 126 | 58 / 48 / 47 / 0 | 865 | 1053 | 16 / 16 (errori 0 / 0) |  |
+| 17 | 299950 | 299950 | 300009 | 5000 | 14.3 / 25.0 / 34.4 | 87 / 121 / 130 | 59 / 49 / 49 / 0 | 865 | 1119 | 17 / 17 (errori 0 / 0) |  |
+| 18 | 300050 | 300050 | 299962 | 4999 | 14.5 / 23.8 / 27.2 | 86 / 120 / 127 | 58 / 48 / 48 / 0 | 865 | 1184 | 18 / 18 (errori 0 / 0) |  |
+| 19 | 299900 | 299900 | 300004 | 5000 | 15.8 / 27.6 / 31.9 | 89 / 125 / 133 | 63 / 51 / 51 / 0 | 866 | 1250 | 19 / 19 (errori 0 / 0) |  |
+| 20 | 297000 | 297000 | 296507 | 4942 | 14.5 / 25.6 / 30.8 | 88 / 122 / 133 | 61 / 48 / 48 / 0 | 866 | 1315 | 20 / 20 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 21 | 302700 | 302700 | 303425 | 5057 | 16.1 / 25.5 / 28.5 | 80 / 114 / 125 | 63 / 50 / 51 / 0 | 866 | 1382 | 21 / 21 (errori 0 / 0) |  |
+| 22 | 300500 | 300500 | 300022 | 5000 | 15.8 / 25.9 / 30.6 | 82 / 115 / 123 | 64 / 51 / 53 / 0 | 866 | 1447 | 22 / 22 (errori 0 / 0) |  |
+| 23 | 299800 | 299800 | 299999 | 5000 | 15.1 / 25.8 / 28.9 | 80 / 113 / 120 | 60 / 49 / 50 / 0 | 866 | 1513 | 23 / 23 (errori 0 / 0) |  |
+| 24 | 299750 | 299750 | 299943 | 4999 | 14.5 / 23.8 / 27.0 | 78 / 112 / 117 | 59 / 48 / 48 / 0 | 866 | 1579 | 24 / 24 (errori 0 / 0) |  |
+| 25 | 298150 | 298150 | 297488 | 4958 | 15.1 / 25.3 / 28.7 | 80 / 113 / 119 | 61 / 49 / 49 / 0 | 867 | 1644 | 25 / 25 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+| 26 | 301950 | 301950 | 302323 | 5039 | 14.3 / 24.9 / 28.3 | 53 / 133 / 137 | 59 / 48 / 49 / 0 | 867 | 1711 | 26 / 26 (errori 0 / 0) |  |
+| 27 | 300350 | 300350 | 300800 | 5013 | 14.4 / 23.7 / 27.4 | 53 / 134 / 137 | 59 / 48 / 48 / 0 | 867 | 1777 | 27 / 27 (errori 0 / 0) |  |
+| 28 | 299900 | 299900 | 299201 | 4987 | 14.2 / 22.5 / 26.1 | 53 / 133 / 137 | 58 / 47 / 47 / 0 | 867 | 1842 | 28 / 28 (errori 0 / 0) |  |
+| 29 | 300100 | 300100 | 300799 | 5013 | 13.9 / 23.0 / 26.1 | 52 / 133 / 136 | 57 / 47 / 47 / 0 | 867 | 1908 | 29 / 29 (errori 0 / 0) |  |
+| 30 | 297600 | 297600 | 296802 | 4947 | 14.2 / 22.8 / 26.1 | 53 / 134 / 138 | 58 / 47 / 46 / 0 | 868 | 1973 | 30 / 30 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+totale: inviate 8999200, accettate 8999200, rifiutate all'ingresso 0, incluse 8999206, non incluse 0
+TPS effettivi medi 4997 (richiesti 5000); altezza 18013
+blocco (tutta la prova): p50 14.5 / p95 24.4 / p99 28.2 / max 840.8 ms
+RAM: all'inizio 85 MB, prima del nodo; alla fine 868 MB; stati in RAM 145601
+invio→inclusione (35984 campioni, 1 ogni ~1000 tx, risoluzione ~40 ms): p50 75 / p95 122 / p99 134 / max 972 ms
+CPU media (% di un core): nodo 59, rete 48, client 49, altro 0
+RSS intorno agli snapshot (altezza: prima -> 1 min dopo): 6000: 841 -> 863
+journal 1974 MB = 219 byte/tx, 3945 MB/ora; snapshot 91 MB; status.bin 11.4 MB
+stati: 30 trovati e 30 scaduti come atteso (errori 0 / 0); wallet sotto carico: 6 ok, 0 errori
+snapshot durante il carico: 1 (blocchi con snapshot: 841 ms), pausa massima 841 ms
+riavvio da snapshot (altezza 18000) + journal: 15.1 s, altezza 18013, hash uguali
+riesecuzione completa: stato iniziale 1.3 s, journal 336.7 s (altezza 18013)
+  preparazione (fino all'altezza 1): 1 blocchi, 0 tx, 0.0 s, 0.1 ms/blocco
+  carico: 17948 blocchi, 8999206 tx, 331.0 s, 18.4 ms/blocco
+  tx incluse ma fallite (eseguite con errore, contate rieseguendo il journal): 0
+  blocchi vuoti dopo l'inizio del carico (battito, coda): 0 blocchi, 0 tx, 0.0 s, 0.0 ms/blocco
+  hash finale (blocco, stato incrementale, stato ricalcolato) uguali al nodo vivo
+FINE
+
+## RSS intorno agli snapshot da campionamento esterno
+
+Il binario di questo run riconosceva uno snapshot solo vedendo esattamente l'altezza multipla di 3000; sotto carico RPC li ha persi quasi tutti (corretto in 6cdf6cf). Dal minuto 11 un campionatore esterno ha registrato ogni secondo altezza (getSlot) e RSS del processo:
+
+- snapshot 9000: RSS subito prima 865 MB, 60 s dopo 865 MB
+- snapshot 12000: RSS subito prima 866 MB, 60 s dopo 866 MB
+- snapshot 15000: RSS subito prima 866 MB, 60 s dopo 867 MB
+- snapshot 18000: RSS subito prima 868 MB, 60 s dopo n/d (carico finito prima dei 60 s)

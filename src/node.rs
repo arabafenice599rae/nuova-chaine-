@@ -1,6 +1,6 @@
 //! Nodo: apertura (snapshot + journal), produzione dei blocchi, snapshot periodici.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -26,13 +26,20 @@ pub struct Node {
     pub cfg: Config,
     pub index: TxIndex,
     /// Ultimi blocchi per il recupero dello stream: (altezza, offset nel journal, account cambiati).
+    /// Limitati da `stream_catchup_blocks` e `stream_catchup_bytes`: vale il primo raggiunto.
     pub recent: VecDeque<(u64, u64, Vec<Address>)>,
+    /// Byte stimati di `recent` (indirizzi più l'intestazione di ogni voce).
+    pub recent_bytes: usize,
     /// Istante di arrivo delle richieste sendTransaction, per misurare il tempo nel nodo.
-    pub arrivals: std::collections::HashMap<solana_signature::Signature, Instant>,
+    pub arrivals: HashMap<solana_signature::Signature, Instant>,
     /// Ora dell'ultimo blocco prodotto da questo processo (None dopo l'avvio).
     last_tick_ms: Option<u64>,
     /// Offset nel journal dell'ultimo blocco (None all'altezza 0).
     pub last_offset: Option<u64>,
+    /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
+    pub last_tick_us: u64,
+    /// Durata della scrittura dell'ultimo snapshot (µs, dentro il suo tick): solo misura.
+    pub last_snapshot_us: u64,
     journal: Journal,
     dir: PathBuf,
     keypair: Keypair,
@@ -47,24 +54,15 @@ impl Node {
         }
         let dir = cfg.node.data_dir.clone();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let snap = ledger::read_snapshot(&dir).map_err(|e| e.to_string())?;
-        let snap_height = snap.as_ref().map_or(0, |s| s.height);
-        let mut chain = match snap {
-            None => genesis::build(&cfg.genesis)?.0,
-            Some(s) => {
-                // Lo snapshot deve appartenere a questo genesis (parametri inclusi nel suo hash).
-                let expected = genesis::build(&cfg.genesis)?.0.genesis_hash;
-                if s.genesis_hash != expected {
-                    return Err(format!("snapshot of another genesis ({} instead of {expected})", s.genesis_hash));
-                }
-                let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
-                // La finestra parte dal genesis; il journal fino a `snap_height` la riempie.
-                Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash)
-            }
-        };
-        let mut index = TxIndex::default();
-        let mut recent = VecDeque::new();
-        let window = cfg.node.stream_catchup_blocks;
+        let (mut chain, snap_height) = chain_from_snapshot(&cfg, &dir)?;
+        // Finestre in RAM dimensionate subito (nessun ridimensionamento): firme della
+        // finestra anti-duplicati e stati delle tx degli stessi blocchi.
+        let window = chain.params.blockhash_window as usize * cfg.node.max_block_txs;
+        chain.reserve_signatures(window);
+        let mut index = TxIndex::new(chain.params.blockhash_window as u64, cfg.node.rpc_recent_txs, window);
+        index.load(&dir, snap_height).map_err(|e| format!("status.bin: {e}"))?;
+        let (mut recent, mut recent_bytes) = (VecDeque::new(), 0);
+        let limits = (cfg.node.stream_catchup_blocks, cfg.node.stream_catchup_bytes);
         let mut last_offset = None;
         let journal = Journal::open(&dir.join("journal.bin"), |b, offset| {
             last_offset = Some(offset);
@@ -78,8 +76,8 @@ impl Node {
                 chain.note_block(&b)
             } else {
                 let ex = chain.apply(&b)?;
-                index.record(&ex);
-                remember(&mut recent, window, b.header.height, offset, &ex);
+                index.record(&ex, |_| None);
+                remember(&mut recent, &mut recent_bytes, limits, b.header.height, offset, &ex);
                 Ok(())
             }
         })?;
@@ -87,7 +85,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, arrivals: Default::default(), last_tick_ms: None, last_offset, journal, dir, keypair })
+        Ok(Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, journal, dir, keypair })
     }
 
     /// Salto di altezza: slot trascorsi dall'ultimo blocco di questo processo, tra 1 e
@@ -100,7 +98,7 @@ impl Node {
 
     /// Produce il blocco successivo: preleva in ordine FIFO, esegue, firma, scrive nel journal.
     pub fn tick(&mut self, now_ms: u64) -> Result<Executed, String> {
-        let start = Instant::now();
+        let started = Instant::now();
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
         let height = self.chain.height + self.gap(now_ms);
         self.last_tick_ms = Some(now_ms);
@@ -108,26 +106,24 @@ impl Node {
         let t = Instant::now();
         let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
         ex.phases.journal = t.elapsed();
-        self.index.record(&ex);
-        for tx in &ex.block.txs {
-            if let Some(t) = self.arrivals.remove(&tx.signatures[0]) {
-                let us = t.elapsed().as_micros() as u64;
-                if let Some(r) = self.index.by_sig.get_mut(&tx.signatures[0]) {
-                    r.node_us = Some(us);
-                }
-            }
-        }
+        let arrivals = &mut self.arrivals;
+        let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
+        self.index.record(&ex, |s| us.get(s).copied());
         if self.arrivals.len() > 100_000 {
             self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
         }
         self.last_offset = Some(offset);
-        remember(&mut self.recent, self.cfg.node.stream_catchup_blocks, ex.block.header.height, offset, &ex);
+        let limits = (self.cfg.node.stream_catchup_blocks, self.cfg.node.stream_catchup_bytes);
+        remember(&mut self.recent, &mut self.recent_bytes, limits, ex.block.header.height, offset, &ex);
         let every = self.cfg.node.snapshot_every;
         if every > 0 && ex.block.header.height % every == 0 {
+            let t = Instant::now();
             self.snapshot()?;
+            self.last_snapshot_us = t.elapsed().as_micros() as u64;
         }
         let p = &mut ex.phases;
-        p.other = start.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
+        p.other = started.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
+        self.last_tick_us = started.elapsed().as_micros() as u64;
         Ok(ex)
     }
 
@@ -168,6 +164,8 @@ impl Node {
     }
 
     pub fn snapshot(&mut self) -> Result<(), String> {
+        // Prima gli stati della finestra (non lo storico), poi lo snapshot della stessa altezza.
+        self.index.save(&self.dir, self.chain.height).map_err(|e| format!("status.bin: {e}"))?;
         let c = &self.chain;
         ledger::write_snapshot(&self.dir, c.height, c.genesis_hash, c.svm.accounts().iter()).map_err(|e| format!("snapshot: {e}"))
     }
@@ -180,12 +178,30 @@ pub struct Running {
     pub cfg: Config,
 }
 
+/// Stato da `dir/snapshot.bin` (o dal genesis se manca) e altezza dello snapshot: la
+/// finestra dei blockhash si riempie poi con il journal fino a quell'altezza.
+pub fn chain_from_snapshot(cfg: &Config, dir: &std::path::Path) -> Result<(Chain, u64), String> {
+    let params = cfg.genesis.params()?;
+    let Some(s) = ledger::read_snapshot(dir).map_err(|e| e.to_string())? else {
+        return Ok((genesis::build(&cfg.genesis)?.0, 0));
+    };
+    // Lo snapshot deve appartenere a questo genesis (parametri inclusi nel suo hash).
+    let expected = genesis::build(&cfg.genesis)?.0.genesis_hash;
+    if s.genesis_hash != expected {
+        return Err(format!("snapshot of another genesis ({} instead of {expected})", s.genesis_hash));
+    }
+    let height = s.height;
+    let svm = Svm::restore(s.accounts, params.lamports_per_signature, s.genesis_hash)?;
+    Ok((Chain::new(svm, params, 0, s.genesis_hash, cfg.genesis.timestamp_ms, s.genesis_hash), height))
+}
+
 /// Apre il nodo su un thread dedicato (litesvm vive lì) e restituisce i canali.
 pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
     use crate::rpc::{BlockEvent, Gateway};
     let (qtx, qrx) = std::sync::mpsc::channel::<Query>();
     let (events, _) = tokio::sync::broadcast::channel(1024);
     let (blocks, _) = tokio::sync::broadcast::channel(cfg.node.stream_max_lag_blocks.max(1));
+    let running_indexer = cfg.node.indexer_rpc.clone();
     let log = if cfg.node.rpc_log {
         std::fs::create_dir_all(&cfg.node.data_dir).map_err(|e| e.to_string())?;
         let path = cfg.node.data_dir.join("rpc.log");
@@ -195,7 +211,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         None
     };
     let running = Running {
-        gateway: Gateway { queries: qtx.clone(), events: events.clone(), log },
+        gateway: Gateway { queries: qtx.clone(), events: events.clone(), log, indexer: running_indexer },
         stream: crate::stream::Stream {
             queries: qtx,
             blocks: blocks.clone(),
@@ -204,7 +220,8 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         cfg: cfg.clone(),
     };
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    // Nome del thread: visibile in top -H e nelle misure di CPU per thread.
+    let spawned = std::thread::Builder::new().name("centrifuga-node".into()).spawn(move || {
         let sym = cfg.genesis.symbol.clone();
         let node = match Node::open(cfg, keypair) {
             Ok(n) => n,
@@ -232,6 +249,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
             std::process::exit(1);
         }
     });
+    spawned.map_err(|e| format!("node thread: {e}"))?;
     ready_rx.recv().map_err(|e| e.to_string())??;
     Ok(running)
 }
@@ -247,10 +265,20 @@ impl Running {
     }
 }
 
-fn remember(recent: &mut VecDeque<(u64, u64, Vec<Address>)>, window: usize, height: u64, offset: u64, ex: &Executed) {
-    recent.push_back((height, offset, ex.changed.iter().copied().collect()));
-    while recent.len() > window {
-        recent.pop_front();
+/// Byte di una voce di `recent`: gli indirizzi più l'intestazione (altezza, offset, Vec).
+pub fn recent_entry_bytes(changed: usize) -> usize {
+    changed * 32 + 48
+}
+
+/// Aggiunge un blocco alla finestra del recupero e toglie i più vecchi finché valgono
+/// entrambi i limiti (blocchi e byte): vale il primo raggiunto.
+fn remember(recent: &mut VecDeque<(u64, u64, Vec<Address>)>, bytes: &mut usize, (max_blocks, max_bytes): (usize, usize), height: u64, offset: u64, ex: &Executed) {
+    let changed: Vec<Address> = ex.changed.iter().copied().collect();
+    *bytes += recent_entry_bytes(changed.len());
+    recent.push_back((height, offset, changed));
+    while recent.len() > max_blocks || (*bytes > max_bytes && !recent.is_empty()) {
+        let (_, _, old) = recent.pop_front().unwrap();
+        *bytes -= recent_entry_bytes(old.len());
     }
 }
 
