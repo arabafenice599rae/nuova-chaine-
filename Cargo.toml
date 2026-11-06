@@ -45,8 +45,8 @@ base64 = "0.22"
 bs58 = "0.5"
 solana-transaction-error = { version = "~3.4", features = ["serde"] }
 # HTTPS del wallet: TLS 1.3, ring, CA pubbliche di Mozilla compilate nel binario.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-webpki-roots = "1"
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std"] }
+webpki-roots = "=1.0.11"
 # Hash di stato incrementale (LtHash di Agave); blake3 è già nel grafo di litesvm.
 solana-lattice-hash = { version = "=4.3.2", features = ["agave-unstable-api"] }
 blake3 = "1.8"
