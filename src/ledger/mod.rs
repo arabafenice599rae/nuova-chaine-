@@ -113,13 +113,30 @@ pub fn write_snapshot_file<'a>(
     state_hash: Hash,
     sorted: impl ExactSizeIterator<Item = (&'a Address, &'a AccountSharedData)>,
 ) -> io::Result<()> {
-    let mut w = BufWriter::new(File::create(path)?);
-    w.write_all(SNAP_MAGIC)?;
-    w.write_all(&height.to_le_bytes())?;
-    w.write_all(genesis_hash.as_ref())?;
-    w.write_all(state_hash.as_ref())?;
-    w.write_all(&(sorted.len() as u64).to_le_bytes())?;
+    let mut w = SnapshotWriter::create(path, height, genesis_hash, state_hash, sorted.len() as u64)?;
     for (k, a) in sorted {
+        w.push(k, a)?;
+    }
+    w.finish()
+}
+
+/// Scrittura di uno snapshot un account alla volta, in ordine di indirizzo (lo stato
+/// ombra la interrompe per raccogliere i delta che arrivano nel frattempo).
+pub struct SnapshotWriter(BufWriter<File>);
+
+impl SnapshotWriter {
+    pub fn create(path: &Path, height: u64, genesis_hash: Hash, state_hash: Hash, count: u64) -> io::Result<SnapshotWriter> {
+        let mut w = BufWriter::new(File::create(path)?);
+        w.write_all(SNAP_MAGIC)?;
+        w.write_all(&height.to_le_bytes())?;
+        w.write_all(genesis_hash.as_ref())?;
+        w.write_all(state_hash.as_ref())?;
+        w.write_all(&count.to_le_bytes())?;
+        Ok(SnapshotWriter(w))
+    }
+
+    pub fn push(&mut self, k: &Address, a: &AccountSharedData) -> io::Result<()> {
+        let w = &mut self.0;
         w.write_all(k.as_ref())?;
         w.write_all(&a.lamports().to_le_bytes())?;
         w.write_all(a.owner().as_ref())?;
@@ -127,8 +144,13 @@ pub fn write_snapshot_file<'a>(
         w.write_all(&a.rent_epoch().to_le_bytes())?;
         w.write_all(&(a.data().len() as u64).to_le_bytes())?;
         w.write_all(a.data())?;
+        Ok(())
     }
-    w.into_inner().map_err(|e| e.into_error())?.sync_all()
+
+    /// Flush e fsync.
+    pub fn finish(self) -> io::Result<()> {
+        self.0.into_inner().map_err(|e| e.into_error())?.sync_all()
+    }
 }
 
 pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {

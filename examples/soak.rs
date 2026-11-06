@@ -356,7 +356,7 @@ fn main() {
     }
     std::thread::sleep(Duration::from_millis(300));
     let (h, lh, sh, inc, stl, skipped) = rt
-        .block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), n.snapshot_counts().0)))
+        .block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), (n.snapshot_counts().0, n.snapshot_write_stats()))))
         .unwrap();
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
     let hours = t0.elapsed().as_secs_f64() / 3600.0;
@@ -395,7 +395,18 @@ fn main() {
         snap_pauses.iter().map(|p| format!("{p:.0} ms")).collect::<Vec<_>>().join(", "),
         snap_pauses.iter().cloned().fold(0.0, f64::max)
     );
-    say!("snapshot saltati (il precedente era ancora in scrittura): {skipped}");
+    let (skipped, (write_ms, max_queue)) = skipped;
+    let slow = rt.block_on(gw.query(|n: &mut Node| n.slow_blocks.clone())).unwrap();
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    say!(
+        "blocchi oltre 100 ms: {} {}",
+        slow.len(),
+        slow.iter()
+            .map(|(h, us, p)| format!("[{h}: {:.0} ms = esecuzione {:.0} + hash {:.0} + firma {:.0} + journal {:.0} + altro {:.0}]", *us as f64 / 1e3, ms(p.exec), ms(p.hash), ms(p.sign), ms(p.journal), ms(p.other)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    say!("snapshot saltati (scrittura in corso, coda piena o ombra persa): {skipped}; ultima scrittura {write_ms} ms; coda massima durante una scrittura {max_queue} blocchi");
     std::fs::write(dir.join("soak.meta"), format!("{n} {ts} {h} {lh} {sh} {load_from}")).unwrap();
     std::process::exit(0); // il nodo gira sul suo thread: si chiude con il processo
 }

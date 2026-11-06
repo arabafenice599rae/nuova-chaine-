@@ -17,7 +17,7 @@
 //! Un account con 0 lamport è cancellato. Il nodo non aspetta mai i client: chi
 //! resta indietro di più di `stream_max_lag_blocks` viene disconnesso.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -255,7 +255,8 @@ pub struct Replica {
     /// deve essere quello di identità e coincidere, altrimenti il nodo è rifiutato.
     pub expected_chain: Option<(String, Hash)>,
     chain_checked: bool,
-    accounts: HashMap<Address, AccountSharedData>,
+    /// Ordinata per indirizzo: lo stato ombra scrive lo snapshot senza ordinare le chiavi.
+    accounts: BTreeMap<Address, AccountSharedData>,
     /// LtHash di `accounts`, aggiornato con i soli account ricevuti.
     lt: LtState,
 }
@@ -287,7 +288,7 @@ impl Replica {
             max_future_ms: Some(5_000),
             expected_chain: None,
             chain_checked: false,
-            accounts: HashMap::new(),
+            accounts: BTreeMap::new(),
             lt: LtState::empty(),
         }
     }
@@ -304,7 +305,7 @@ impl Replica {
         if self.resync || (self.height == 0 && self.last_hash == Hash::default()) { 0 } else { self.height + 1 }
     }
 
-    pub fn accounts(&self) -> &HashMap<Address, AccountSharedData> {
+    pub fn accounts(&self) -> &BTreeMap<Address, AccountSharedData> {
         &self.accounts
     }
 
@@ -353,7 +354,13 @@ impl Replica {
     /// Replica di fiducia (stesso processo del nodo, nessuna firma da verificare) partita
     /// dallo stato a `height` con hash di stato `state_hash`: la usa lo stato ombra dello
     /// snapshot. L'LtHash completo si calcola qui, sul thread che la chiama.
-    pub fn from_state(height: u64, state_hash: Hash, accounts: HashMap<Address, AccountSharedData>, rules: crate::exec::Rules) -> Result<Replica, String> {
+    pub fn from_state(
+        height: u64,
+        state_hash: Hash,
+        accounts: impl IntoIterator<Item = (Address, AccountSharedData)>,
+        rules: crate::exec::Rules,
+    ) -> Result<Replica, String> {
+        let accounts: BTreeMap<_, _> = accounts.into_iter().collect();
         let lt = LtState::full(&accounts);
         let mut r = Replica::new(Address::default(), rules);
         (r.height, r.last_state, r.accounts, r.lt) = (height, state_hash, accounts, lt);

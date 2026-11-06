@@ -1,10 +1,13 @@
 //! Stato ombra per lo snapshot in background. A ogni blocco il nodo manda il delta
-//! dello stream (gli account toccati, `None` per quelli chiusi) su un canale limitato;
-//! questo thread lo applica a una `stream::Replica`, che verifica l'LtHash a ogni blocco.
-//! All'altezza dello snapshot copia la propria mappa (qui, non sul thread del nodo) e la
-//! passa allo scrittore, che ricalcola l'LtHash completo della copia: se non coincide con
-//! quello del nodo non scrive e segnala l'errore. Il nodo non aspetta mai: se il canale è
-//! pieno l'ombra è persa, gli snapshot successivi si saltano (contati) fino al riavvio.
+//! dello stream (gli account toccati, `None` per quelli chiusi) e gli stati delle sue tx
+//! su un canale limitato; questo thread (a priorità bassa) li applica a una
+//! `stream::Replica` con la mappa ordinata, che verifica l'LtHash a ogni blocco.
+//! All'altezza dello snapshot scrive la propria mappa in ordine, senza copiarla, e intanto
+//! calcola l'LtHash di ciò che scrive: se non coincide con quello del nodo non rinomina il
+//! file e segnala l'errore. Durante la scrittura i messaggi in arrivo vanno in una coda
+//! locale limitata e si applicano in ordine alla fine; se la coda si riempie lo snapshot
+//! si interrompe (saltato, contato) e l'ombra recupera. Il nodo non aspetta mai: se il
+//! canale è pieno l'ombra è persa, gli snapshot si saltano (contati) fino al riavvio.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,6 +38,11 @@ pub enum Msg {
     Sleep(Duration),
     #[doc(hidden)]
     Tamper(solana_address::Address),
+    /// Solo test: pausa dopo ogni account scritto, e limite della coda durante la scrittura.
+    #[doc(hidden)]
+    SlowWrite(Duration),
+    #[doc(hidden)]
+    WriteQueueLimit(usize),
 }
 
 #[derive(Default)]
@@ -42,6 +50,9 @@ pub struct Stats {
     /// Snapshot saltati: scrittore occupato, ombra persa o in errore.
     pub skipped: AtomicU64,
     pub written: AtomicU64,
+    /// Durata dell'ultima scrittura (ms) e coda più lunga raccolta durante una scrittura.
+    pub last_write_ms: AtomicU64,
+    pub max_queue: AtomicU64,
     /// Primo errore (divergenza, scrittura): l'ombra non scrive più fino al riavvio.
     pub error: Mutex<Option<String>>,
 }
@@ -147,81 +158,139 @@ impl Drop for Shadow {
     }
 }
 
-fn run(dir: PathBuf, rep: Result<Replica, String>, mut index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>) {
-    let mut rep = match rep {
+/// Priorità bassa (nice 10) al thread corrente, senza dipendenze: `renice` sul tid.
+fn lower_priority() {
+    let tid = std::fs::read_link("/proc/thread-self").ok().and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
+    if let Some(tid) = tid {
+        let ok = std::process::Command::new("renice").args(["-n", "10", "-p", &tid]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        if !ok.is_ok_and(|s| s.success()) {
+            eprintln!("shadow: could not lower the thread priority (renice)");
+        }
+    }
+}
+
+struct State {
+    dir: PathBuf,
+    rep: Option<Replica>,
+    index: TxIndex,
+    st: Arc<Stats>,
+    slow: Duration,
+    queue_limit: usize,
+}
+
+impl State {
+    /// Un messaggio fuori dalla scrittura.
+    fn handle(&mut self, m: Msg, rx: &Receiver<Msg>) {
+        match m {
+            Msg::Block { height, state_hash, delta, statuses } => {
+                self.index.record_statuses(height, statuses);
+                if let Some(r) = self.rep.as_mut() {
+                    if let Err(e) = r.apply_delta(height, state_hash, &delta) {
+                        self.st.fail(format!("shadow state diverged at {height}: {e}"));
+                        self.rep = None;
+                    }
+                }
+            }
+            Msg::Snapshot { height, genesis_hash, state_hash } => self.snapshot(height, genesis_hash, state_hash, rx),
+            Msg::Barrier(ack) => drop(ack.send(())),
+            Msg::Sleep(d) => std::thread::sleep(d),
+            Msg::Tamper(k) => {
+                if let Some(r) = self.rep.as_mut() {
+                    r.tamper(&k);
+                }
+            }
+            Msg::SlowWrite(d) => self.slow = d,
+            Msg::WriteQueueLimit(n) => self.queue_limit = n,
+        }
+    }
+
+    /// Scrive lo snapshot dalla mappa ordinata, raccogliendo intanto i messaggi; poi li
+    /// applica in ordine. Coda piena: snapshot interrotto (saltato), l'ombra recupera.
+    fn snapshot(&mut self, height: u64, genesis_hash: Hash, state_hash: Hash, rx: &Receiver<Msg>) {
+        let skip = |st: &Stats| st.skipped.fetch_add(1, Ordering::Relaxed);
+        let Some(r) = self.rep.as_ref() else {
+            skip(&self.st);
+            return;
+        };
+        if r.height != height {
+            self.st.fail(format!("shadow state at {} instead of {height}", r.height));
+            self.rep = None;
+            return;
+        }
+        let started = std::time::Instant::now();
+        let mut queue: std::collections::VecDeque<Msg> = Default::default();
+        let mut blocks = 0usize;
+        let status = self.index.encode(height);
+        let tmp = self.dir.join("snapshot.tmp");
+        let result = (|| -> Result<bool, String> {
+            let e = |e: std::io::Error| format!("snapshot {height}: {e}");
+            let mut w = crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?;
+            let mut lt = crate::exec::state_hash::LtState::empty();
+            for (i, (k, a)) in r.accounts().iter().enumerate() {
+                w.push(k, a).map_err(e)?;
+                lt.replace(k, None, Some(a));
+                if !self.slow.is_zero() {
+                    std::thread::sleep(self.slow);
+                }
+                if i % 1024 == 0 || !self.slow.is_zero() {
+                    while let Ok(m) = rx.try_recv() {
+                        match m {
+                            Msg::Snapshot { height: h, .. } => {
+                                skip(&self.st);
+                                eprintln!("snapshot {h} skipped: the previous one is still being written");
+                            }
+                            m => {
+                                blocks += matches!(m, Msg::Block { .. }) as usize;
+                                queue.push_back(m);
+                            }
+                        }
+                    }
+                    self.st.max_queue.fetch_max(blocks as u64, Ordering::Relaxed);
+                    if blocks > self.queue_limit {
+                        return Ok(false); // interrotto: troppi blocchi in coda
+                    }
+                }
+            }
+            w.finish().map_err(e)?;
+            // Prima di rinominare: LtHash di ciò che è stato scritto = hash di stato del nodo.
+            if lt.hash() != state_hash {
+                return Err(format!("snapshot {height} not written: shadow state hash {} differs from the node's {state_hash}", lt.hash()));
+            }
+            crate::node::finish_snapshot(&self.dir, height, &status)?;
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => {
+                self.st.written.fetch_add(1, Ordering::Relaxed);
+                self.st.last_write_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            }
+            Ok(false) => {
+                let _ = std::fs::remove_file(&tmp);
+                skip(&self.st);
+                eprintln!("snapshot {height} interrupted: more than {} blocks queued during the write", self.queue_limit);
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                self.st.fail(e);
+            }
+        }
+        for m in queue {
+            self.handle(m, rx);
+        }
+    }
+}
+
+fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>) {
+    lower_priority();
+    let rep = match rep {
         Ok(r) => Some(r),
         Err(e) => {
             st.fail(format!("shadow state: {e}"));
             None
         }
     };
-    let mut writer: Option<JoinHandle<Result<(), String>>> = None;
-    let finish = |w: &mut Option<JoinHandle<Result<(), String>>>, st: &Stats| {
-        if let Some(h) = w.take() {
-            match h.join() {
-                Ok(Ok(())) => {
-                    st.written.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok(Err(e)) => st.fail(e),
-                Err(_) => st.fail("snapshot writer panicked".into()),
-            }
-        }
-    };
-    for m in rx {
-        match m {
-            Msg::Block { height, state_hash, delta, statuses } => {
-                index.record_statuses(height, statuses);
-                if let Some(r) = rep.as_mut() {
-                    if let Err(e) = r.apply_delta(height, state_hash, &delta) {
-                        st.fail(format!("shadow state diverged at {height}: {e}"));
-                        rep = None;
-                    }
-                }
-            }
-            Msg::Snapshot { height, genesis_hash, state_hash } => {
-                let Some(r) = rep.as_ref() else {
-                    st.skipped.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                };
-                if writer.as_ref().is_some_and(|w| !w.is_finished()) {
-                    st.skipped.fetch_add(1, Ordering::Relaxed);
-                    eprintln!("snapshot {height} skipped: the previous one is still being written");
-                    continue;
-                }
-                finish(&mut writer, &st);
-                if r.height != height {
-                    st.fail(format!("shadow state at {} instead of {height}", r.height));
-                    rep = None;
-                    continue;
-                }
-                let copy = r.accounts().clone();
-                let status = index.encode(height);
-                let dir = dir.clone();
-                let spawned = std::thread::Builder::new().name("centrifuga-snapshot".into()).spawn(move || {
-                    // Prima di scrivere: LtHash completo della copia = hash di stato del nodo.
-                    let full = crate::exec::state_hash::LtState::full(&copy).hash();
-                    if full != state_hash {
-                        return Err(format!("snapshot {height} not written: shadow state hash {full} differs from the node's {state_hash}"));
-                    }
-                    let accounts: Vec<_> = copy.into_iter().collect();
-                    crate::node::write_snapshot_and_status(&dir, height, genesis_hash, state_hash, accounts, &status)
-                });
-                match spawned {
-                    Ok(h) => writer = Some(h),
-                    Err(e) => st.fail(format!("snapshot thread: {e}")),
-                }
-            }
-            Msg::Barrier(ack) => {
-                finish(&mut writer, &st);
-                let _ = ack.send(());
-            }
-            Msg::Sleep(d) => std::thread::sleep(d),
-            Msg::Tamper(k) => {
-                if let Some(r) = rep.as_mut() {
-                    r.tamper(&k);
-                }
-            }
-        }
+    let mut state = State { dir, rep, index, st, slow: Duration::ZERO, queue_limit: QUEUE_BLOCKS };
+    while let Ok(m) = rx.recv() {
+        state.handle(m, &rx);
     }
-    finish(&mut writer, &st);
 }

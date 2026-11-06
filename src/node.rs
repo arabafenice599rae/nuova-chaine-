@@ -43,6 +43,8 @@ pub struct Node {
     pub last_snapshot_us: u64,
     /// Stato ombra per lo snapshot in background (None con `snapshot_every = 0`).
     shadow: Option<crate::shadow::Shadow>,
+    /// Blocchi oltre 100 ms (altezza, µs, fasi): solo misura, al massimo 64.
+    pub slow_blocks: Vec<(u64, u64, crate::exec::Phases)>,
     /// Altezza dell'ultimo delta mandato all'ombra.
     shadow_at: u64,
     /// Delta dell'ultimo blocco (lo stesso per lo stream e per l'ombra).
@@ -92,7 +94,7 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, shadow: None, shadow_at: 0, last_delta: None, journal, dir, keypair };
+        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, last_snapshot_us: 0, shadow: None, slow_blocks: vec![], shadow_at: 0, last_delta: None, journal, dir, keypair };
         if n.cfg.node.snapshot_every > 0 {
             n.start_shadow()?;
         }
@@ -143,6 +145,9 @@ impl Node {
         let p = &mut ex.phases;
         p.other = started.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
         self.last_tick_us = started.elapsed().as_micros() as u64;
+        if self.last_tick_us > 100_000 && self.slow_blocks.len() < 64 {
+            self.slow_blocks.push((ex.block.header.height, self.last_tick_us, ex.phases));
+        }
         Ok(ex)
     }
 
@@ -227,6 +232,12 @@ impl Node {
         self.shadow.as_ref().map_or((0, 0), |s| (s.stats.skipped.load(Relaxed), s.stats.written.load(Relaxed)))
     }
 
+    /// Durata dell'ultima scrittura (ms) e coda più lunga (blocchi) durante una scrittura.
+    pub fn snapshot_write_stats(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.shadow.as_ref().map_or((0, 0), |s| (s.stats.last_write_ms.load(Relaxed), s.stats.max_queue.load(Relaxed)))
+    }
+
     /// Solo test: accesso diretto al thread dell'ombra.
     #[doc(hidden)]
     pub fn shadow_for_test(&mut self) -> Option<&mut crate::shadow::Shadow> {
@@ -253,11 +264,18 @@ pub fn write_snapshot_and_status(
     mut accounts: Vec<(Address, solana_account::AccountSharedData)>,
     status: &[u8],
 ) -> Result<(), String> {
-    use std::io::Write;
     accounts.sort_unstable_by_key(|(k, _)| *k);
+    let tmp = dir.join("snapshot.tmp");
+    ledger::write_snapshot_file(&tmp, height, genesis_hash, state_hash, accounts.iter().map(|(k, a)| (k, a))).map_err(|e| format!("snapshot {height}: {e}"))?;
+    finish_snapshot(dir, height, status)
+}
+
+/// Dopo `snapshot.tmp` scritto con fsync: `status.tmp` con fsync, poi i due rename
+/// (prima lo snapshot, poi gli stati della stessa altezza) e fsync della cartella.
+pub fn finish_snapshot(dir: &std::path::Path, height: u64, status: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     let e = |e: std::io::Error| format!("snapshot {height}: {e}");
     let tmp = dir.join("snapshot.tmp");
-    ledger::write_snapshot_file(&tmp, height, genesis_hash, state_hash, accounts.iter().map(|(k, a)| (k, a))).map_err(e)?;
     let stmp = dir.join("status.tmp");
     let mut f = std::fs::File::create(&stmp).map_err(e)?;
     f.write_all(status).map_err(e)?;

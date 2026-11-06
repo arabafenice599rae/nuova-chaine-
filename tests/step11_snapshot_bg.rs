@@ -258,3 +258,44 @@ fn slow_shadow_skips_snapshots_without_slowing_the_node() {
     let e = n.wait_snapshot().unwrap_err();
     assert!(e.contains("lost"), "{e}");
 }
+
+/// Scrittura lenta: i blocchi in coda superano il limite, lo snapshot si interrompe (saltato,
+/// contato), l'ombra applica i delta in ordine e lo snapshot successivo è di nuovo esatto.
+#[test]
+fn write_interrupted_when_queue_fills_then_shadow_recovers() {
+    use centrifuga::shadow::Msg;
+    let d = dir("shadow_interrupt");
+    let cfg = config(&d, 10);
+    let t0 = cfg.genesis.timestamp_ms;
+    let mut n = Node::open(cfg, op()).unwrap();
+    let mut c = Node::open(config(&dir("shadow_interrupt_ref"), 0), op()).unwrap();
+    {
+        let s = n.shadow_for_test().unwrap();
+        s.send_blocking(Msg::WriteQueueLimit(2));
+        s.send_blocking(Msg::SlowWrite(std::time::Duration::from_millis(5)));
+    }
+    let mut slowest = 0u128;
+    for i in 1..=30 {
+        block(&mut c, t0, i);
+        let t = std::time::Instant::now();
+        block(&mut n, t0, i);
+        slowest = slowest.max(t.elapsed().as_millis());
+    }
+    {
+        let s = n.shadow_for_test().unwrap();
+        s.send_blocking(Msg::SlowWrite(std::time::Duration::ZERO));
+        s.send_blocking(Msg::WriteQueueLimit(centrifuga::shadow::QUEUE_BLOCKS));
+    }
+    for i in 31..=40 {
+        block(&mut c, t0, i);
+        block(&mut n, t0, i);
+    }
+    n.wait_snapshot().unwrap();
+    assert!(slowest < 200, "il nodo non ha aspettato la scrittura: {slowest} ms");
+    let (skipped, written) = n.snapshot_counts();
+    assert!(skipped >= 1, "snapshot interrotti o saltati: {skipped}");
+    assert!(written >= 1);
+    assert!(!n.shadow_for_test().unwrap().lost(), "l'ombra non si è persa: ha recuperato");
+    assert_eq!(ledger::read_snapshot(&d).unwrap().unwrap().height, 40);
+    assert_eq!(std::fs::read(d.join("snapshot.bin")).unwrap(), reference(&c, "shadow_interrupt_ref_snap"), "dopo il recupero lo snapshot è esatto");
+}
