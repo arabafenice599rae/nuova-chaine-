@@ -32,3 +32,14 @@ macchina: 4 vCPU, Intel(R) Xeon(R) Processor @ 2.10GHz; commit 4b3128a; avvio 17
 | 25 | 304800 | 304800 | 298500 | 4975 | 13.3 / 17.9 / 20.2 | 1205 | 1646 | 25 / 25 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
 | 26 | 295200 | 295200 | 301601 | 5027 | 13.5 / 18.6 / 25.7 | 1217 | 1711 | 26 / 26 (errori 0 / 0) |  |
 | 27 | 299950 | 299950 | 300000 | 5000 | 13.9 / 18.9 / 23.6 | 1236 | 1776 | 27 / 27 (errori 0 / 0) |  |
+| 28 | 300200 | 300200 | 300000 | 5000 | 13.8 / 19.7 / 26.0 | 1255 | 1842 | 28 / 28 (errori 0 / 0) |  |
+| 29 | 299850 | 299850 | 300000 | 5000 | 14.2 / 19.2 / 23.9 | 1275 | 1908 | 29 / 29 (errori 0 / 0) |  |
+| 30 | 304950 | 304950 | 297950 | 4966 | 13.6 / 19.2 / 43.9 | 1317 | 1975 | 30 / 30 (errori 0 / 0) | ok (fee 0.000005 CnFA, reward 0.0000045 CnFA, refund 0 CnFA, net cost 0.0000005 CnFA) |
+totale: inviate 9005250, accettate 9005250, rifiutate all'ingresso 0, incluse 9005256, non incluse 0
+TPS effettivi medi 4999 (richiesti 5000); altezza 18014
+blocco (tutta la prova): p50 12.9 / p95 18.0 / p99 22.5 / max 1189.6 ms
+RAM: all'inizio 85 MB, prima del nodo; alla fine 1318 MB; stati in RAM 150801
+journal 1975 MB = 219 byte/tx, 3947 MB/ora; snapshot 91 MB; status.bin 11.4 MB
+stati: 30 trovati e 30 scaduti come atteso (errori 0 / 0); wallet sotto carico: 6 ok, 0 errori
+snapshot durante il carico: 6 (blocchi con snapshot: 1144 ms, 1177 ms, 1136 ms, 1066 ms, 1100 ms, 1190 ms), pausa massima 1190 ms
+riavvio da snapshot (altezza 18000) + journal: 14.6 s, altezza 18014, hash uguali
