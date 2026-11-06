@@ -1,0 +1,23 @@
+[package]
+name = "centrifuga-test-echo"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Programma di prova per il deploy (solo test): scrive la propria versione nei log e nei return data."
+
+[package.metadata.solana]
+tools-version = "v1.57"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+v2 = []
+
+[dependencies]
+pinocchio = "=0.9.2"
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

@@ -31,6 +31,14 @@ jobs:
         working-directory: tests/web3
       - name: test web3.js contro un nodo devnet
         run: scripts/web3-node.sh rpc.mjs
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/solana
+          key: solana-cli-${{ runner.os }}-4.3.2
+      - name: CLI Solana 4.3.2 (da crates.io, in cache)
+        run: command -v solana || cargo +1.97.1 install solana-cli --version 4.3.2 --locked --no-default-features
+      - name: solana program deploy (deploy, chiamata, upgrade, riavvio)
+        run: scripts/cli-deploy.sh
 
   timelock:
     name: SHA-256 del programma timelock

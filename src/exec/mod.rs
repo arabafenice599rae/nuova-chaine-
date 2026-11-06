@@ -176,6 +176,19 @@ pub struct Executed {
     /// Saldi (prima, dopo) degli account statici di ogni tx, per getTransaction.
     pub balances: Vec<(Vec<u64>, Vec<u64>)>,
     pub settlement: Settlement,
+    /// Tempo per fase (misura, non entra nel consenso).
+    pub phases: Phases,
+}
+
+/// Tempo per fase di un blocco: esecuzione (tx e fee), hash di stato, firma,
+/// journal, altro (prelievo dalla coda, indice RPC, stream, snapshot).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Phases {
+    pub exec: std::time::Duration,
+    pub hash: std::time::Duration,
+    pub sign: std::time::Duration,
+    pub journal: std::time::Duration,
+    pub other: std::time::Duration,
 }
 
 /// Una tx durable-nonce: (account nonce, autorità).
@@ -431,6 +444,7 @@ impl Chain {
 
     /// Esegue un blocco. `strict` = riesecuzione: ogni tx deve essere includibile.
     fn run(&mut self, height: u64, ts: u64, txs: Vec<VersionedTransaction>, strict: bool) -> Result<Executed, String> {
+        let t0 = std::time::Instant::now();
         self.expire(height);
         self.pre.clear();
         self.touch(sysvar::clock::id());
@@ -470,6 +484,8 @@ impl Chain {
             results.push(ex.result);
         }
         let settlement = self.settle(height, &paid, &mut changed);
+        let exec = t0.elapsed();
+        let t1 = std::time::Instant::now();
         let before = std::mem::take(&mut self.pre);
         self.lt.update(&before, self.svm.accounts());
         changed.extend(before.keys()); // il delta dello stream copre ogni account toccato
@@ -484,7 +500,8 @@ impl Chain {
         }
         self.height = height;
         self.last_ts = ts;
-        Ok(Executed { block, changed, results, balances, settlement })
+        let phases = Phases { exec, hash: t1.elapsed(), ..Phases::default() };
+        Ok(Executed { block, changed, results, balances, settlement, phases })
     }
 
     fn finish(&mut self, ex: &Executed) {
@@ -504,7 +521,9 @@ impl Chain {
         assert!((1..=self.params.rules.heartbeat_slots).contains(&gap), "height gap {gap} outside the rules");
         let ts = now_ms.max(self.params.rules.min_timestamp(self.last_ts, gap));
         let mut ex = self.run(height, ts, txs, false).expect("non-strict production");
+        let t = std::time::Instant::now();
         ex.block.sign(kp);
+        ex.phases.sign = t.elapsed();
         self.finish(&ex);
         ex
     }
