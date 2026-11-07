@@ -91,6 +91,9 @@ pub struct NodeConfig {
     /// Limite in byte della stessa finestra (indirizzi degli account cambiati in RAM).
     #[serde(default = "default_stream_catchup_bytes")]
     pub stream_catchup_bytes: usize,
+    /// Banda massima della scrittura dello snapshot (MB/s, 0 = nessun limite).
+    #[serde(default = "default_snapshot_mb_s")]
+    pub snapshot_mb_s: u64,
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
@@ -184,18 +187,9 @@ impl GenesisConfig {
             block_budget: self.block_budget_lamports,
             halving_blocks: self.halving_blocks,
             mining_end_height: self.fee_mining_end_height,
-            vaults: Vaults {
-                mining: vault_address("mining"),
-                airdrop: vault_address("airdrop"),
-                reserve: vault_address("reserve"),
-            },
+            vaults: Vaults { mining: vault_address("mining"), airdrop: vault_address("airdrop"), reserve: vault_address("reserve") },
             rules: Rules { slot_ms: self.slot_ms, heartbeat_slots: self.heartbeat_slots },
-            identity: Identity {
-                chain_id: self.chain_id.clone(),
-                name: self.chain_name.clone(),
-                symbol: self.symbol.clone(),
-                decimals: self.decimals,
-            },
+            identity: Identity { chain_id: self.chain_id.clone(), name: self.chain_name.clone(), symbol: self.symbol.clone(), decimals: self.decimals },
         })
     }
 }
@@ -233,9 +227,7 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     let mainnet = g.network == "mainnet";
     // Solo mainnet: importi fissi e sblocco dell'operatore in 48 mesi esatti.
     if mainnet && (g.airdrop_cnfa, g.mining_cnfa, g.operator_cnfa) != (AIRDROP_CNFA, MINING_CNFA, OPERATOR_CNFA) {
-        return Err(format!(
-            "mainnet allocation must be airdrop {AIRDROP_CNFA}, mining {MINING_CNFA}, operator {OPERATOR_CNFA} CnFA (reserve: the rest)"
-        ));
+        return Err(format!("mainnet allocation must be airdrop {AIRDROP_CNFA}, mining {MINING_CNFA}, operator {OPERATOR_CNFA} CnFA (reserve: the rest)"));
     }
     if mainnet && g.operator_unlock_blocks.checked_mul(g.slot_ms) != Some(OPERATOR_UNLOCK_MS) {
         return Err(format!("mainnet operator_unlock_blocks × slot_ms must be 48 months ({OPERATOR_UNLOCK_MS} ms)"));
@@ -323,6 +315,10 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn default_snapshot_mb_s() -> u64 {
+    100
 }
 
 fn default_stream_catchup_bytes() -> usize {

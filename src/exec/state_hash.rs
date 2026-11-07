@@ -32,7 +32,7 @@ pub struct LtState(LtHash);
 
 impl LtState {
     /// Ricalcolo completo: O(account totali). All'avvio e come riferimento nei test.
-    pub fn full(accounts: &HashMap<Address, AccountSharedData>) -> LtState {
+    pub fn full<'a>(accounts: impl IntoIterator<Item = (&'a Address, &'a AccountSharedData)>) -> LtState {
         let mut lt = LtHash::identity();
         for (k, a) in accounts {
             lt.mix_in(&account_lt_hash(k, a));

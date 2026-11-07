@@ -37,7 +37,8 @@ async fn account_value(gw: &Gateway, k: Address, c: Value) -> (u64, Value) {
             encode::account(&n.chain.svm, a, c["encoding"].as_str(), slice).unwrap_or(Value::Null)
         });
         // Account chiuso: Solana notifica un account vuoto.
-        let empty = json!({"lamports": 0, "owner": "11111111111111111111111111111111", "data": ["", "base64"], "executable": false, "rentEpoch": 0, "space": 0});
+        let empty =
+            json!({"lamports": 0, "owner": "11111111111111111111111111111111", "data": ["", "base64"], "executable": false, "rentEpoch": 0, "space": 0});
         (n.chain.height, v.unwrap_or(empty))
     })
     .await
@@ -88,8 +89,8 @@ async fn conn(s: TcpStream, gw: Gateway) {
                     return;
                 }
                 // Firma già eseguita prima dell'abbonamento: notifica subito.
-                if method == "signatureSubscribe" {
-                    if let Some(Sub::Signature(s)) = subs.get(&next_id) {
+                if method == "signatureSubscribe"
+                    && let Some(Sub::Signature(s)) = subs.get(&next_id) {
                         let s = *s;
                         let done = gw.query(move |n| n.index.status(&s).map(|(slot, err)| (*slot, json!(err)))).await.flatten();
                         if let Some((slot, err)) = done {
@@ -97,7 +98,6 @@ async fn conn(s: TcpStream, gw: Gateway) {
                             let _ = tx.send(notification("signatureNotification", next_id, slot, json!({"err": err}))).await;
                         }
                     }
-                }
             }
             ev = events.recv() => {
                 let ev = match ev {

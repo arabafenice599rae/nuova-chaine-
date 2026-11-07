@@ -1,9 +1,9 @@
 //! Gateway JSON-RPC per i wallet (HTTP) + WebSocket (accountSubscribe,
 //! signatureSubscribe). Solo trasporto: i metodi stanno in `methods.rs`.
 
+pub mod client;
 pub mod encode;
 pub mod index;
-pub mod client;
 pub mod methods;
 mod ws;
 
@@ -11,9 +11,9 @@ use std::convert::Infallible;
 use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::sync::mpsc::Sender;
 
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::{Bytes, Incoming};
@@ -60,7 +60,10 @@ pub struct Gateway {
 /// nodo non aspetta mai l'indexer.
 async fn forward(url: &str, req: &Value) -> Result<Value, String> {
     let host = url.strip_prefix("http://").ok_or("indexer_rpc: solo http://")?.trim_end_matches('/');
-    let s = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(host)).await.map_err(|_| "timeout")?.map_err(|e| e.to_string())?;
+    let s = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(host))
+        .await
+        .map_err(|_| "timeout")?
+        .map_err(|e| e.to_string())?;
     let (mut tx, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(s)).await.map_err(|e| e.to_string())?;
     tokio::spawn(conn);
     let r = Request::post("/").header("host", host).header("content-type", "application/json").body(Full::new(Bytes::from(req.to_string()))).unwrap();
@@ -129,7 +132,9 @@ impl Gateway {
                 v["id"] = id;
                 v
             }
-            (_, Err(e)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": methods::NO_HISTORY, "message": format!("transaction history temporarily unavailable: indexer unreachable ({e})")}}),
+            (_, Err(e)) => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": methods::NO_HISTORY, "message": format!("transaction history temporarily unavailable: indexer unreachable ({e})")}})
+            }
         }
     }
 

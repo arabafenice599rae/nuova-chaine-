@@ -63,7 +63,7 @@ fn main() {
     chain.rehash();
     let setup_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.svm.accounts().iter()).unwrap();
+    centrifuga::ledger::write_snapshot(&dir, 0, chain.genesis_hash, chain.full_state_hash(), chain.svm.accounts().iter()).unwrap();
     let snap_write_s = t.elapsed().as_secs_f64();
     let snap_mb = std::fs::metadata(centrifuga::ledger::snapshot_path(&dir)).unwrap().len() as f64 / 1e6;
     let total_accounts = chain.svm.accounts().len();
@@ -85,9 +85,8 @@ fn main() {
         seed ^= seed << 17;
         seed
     };
-    let all: Vec<Vec<_>> = (0..blocks)
-        .map(|b| (0..per_block).map(|j| transfer_tx(&senders[(j as usize) % SENDERS], &addr(rnd() % n.max(1)), 1 + b, bh)).collect())
-        .collect();
+    let all: Vec<Vec<_>> =
+        (0..blocks).map(|b| (0..per_block).map(|j| transfer_tx(&senders[(j as usize) % SENDERS], &addr(rnd() % n.max(1)), 1 + b, bh)).collect()).collect();
 
     let (mut verify, mut exec, mut included) = (0f64, Vec::new(), 0usize);
     let mut now = centrifuga::node::now_ms();
@@ -107,6 +106,7 @@ fn main() {
     assert_eq!(node.chain.state_hash(), node.chain.full_state_hash(), "LtHash incrementale");
     let t = Instant::now();
     node.snapshot().unwrap();
+    node.wait_snapshot().unwrap();
     let snap2_s = t.elapsed().as_secs_f64();
     let (rss_end, hwm) = rss_mb();
     drop(node);
@@ -127,11 +127,16 @@ fn main() {
     println!("block exec: mean {:.1} ms, p50 {:.1} ms, max {:.1} ms; ingress verify {:.1} ms/block", mean * 1e3, p(0.5), p(1.0), verify / blocks as f64 * 1e3);
     println!(
         "| {n} | {:.1} | {:.0} | {:.0} | {rss_end} (peak {hwm}) | {snap_mb:.0} | {snap_write_s:.1} / {snap2_s:.1} | {restart_s:.1} / {restart2_s:.1} |",
-        mean * 1e3, tps_exec, tps_total
+        mean * 1e3,
+        tps_exec,
+        tps_total
     );
     if let Some((sent_s, incl_s, count, preflight)) = rpc {
-        println!("rpc: {count} txs sent in {sent_s:.1} s ({:.0}/s), all included after {incl_s:.1} s -> {:.0} TPS end-to-end; preflight sample: {preflight:.0}/s",
-            count as f64 / sent_s, count as f64 / incl_s);
+        println!(
+            "rpc: {count} txs sent in {sent_s:.1} s ({:.0}/s), all included after {incl_s:.1} s -> {:.0} TPS end-to-end; preflight sample: {preflight:.0}/s",
+            count as f64 / sent_s,
+            count as f64 / incl_s
+        );
     }
 }
 
@@ -170,7 +175,8 @@ fn rpc_tps(mut cfg: Config, op: &Keypair, senders: &[Keypair], n: u64, bh: solan
     let base = indexed();
     let url = "http://127.0.0.1:19300";
     // Tid del thread del nodo: letto dal thread stesso.
-    let node_tid: u64 = rt.block_on(gw.query(|_| std::fs::read_to_string("/proc/thread-self/stat").unwrap().split(' ').next().unwrap().parse().unwrap())).unwrap();
+    let node_tid: u64 =
+        rt.block_on(gw.query(|_| std::fs::read_to_string("/proc/thread-self/stat").unwrap().split(' ').next().unwrap().parse().unwrap())).unwrap();
     let cpu0 = thread_cpu();
     let t = Instant::now();
     std::thread::scope(|s| {

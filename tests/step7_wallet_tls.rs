@@ -35,17 +35,63 @@ fn make_certs(dir: &Path) {
     std::fs::write(dir.join("ok.ext"), "subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\n").unwrap();
     std::fs::write(dir.join("other.ext"), "subjectAltName=DNS:other.example\nbasicConstraints=CA:FALSE\n").unwrap();
     let sign = |out: &str, ext: &str, serial: &str| {
-        openssl(dir, &["x509", "-req", "-in", "leaf.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-set_serial", serial, "-days", "3650", "-extfile", ext, "-out", out]);
+        openssl(
+            dir,
+            &["x509", "-req", "-in", "leaf.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-set_serial", serial, "-days", "3650", "-extfile", ext, "-out", out],
+        );
     };
     sign("good.crt", "ok.ext", "2");
     sign("other.crt", "other.ext", "3");
     std::fs::write(dir.join("ca.cnf"), "[ca]\ndefault_ca=d\n[d]\ndatabase=index.txt\nnew_certs_dir=.\nserial=serial\npolicy=p\ndefault_md=sha256\nunique_subject=no\n[p]\ncommonName=supplied\n").unwrap();
     std::fs::write(dir.join("index.txt"), "").unwrap();
     std::fs::write(dir.join("serial"), "10\n").unwrap();
-    openssl(dir, &["ca", "-batch", "-config", "ca.cnf", "-cert", "ca.crt", "-keyfile", "ca.key", "-in", "leaf.csr", "-out", "expired.crt", "-startdate", "20200101000000Z", "-enddate", "20210101000000Z", "-extfile", "ok.ext", "-notext"]);
+    openssl(
+        dir,
+        &[
+            "ca",
+            "-batch",
+            "-config",
+            "ca.cnf",
+            "-cert",
+            "ca.crt",
+            "-keyfile",
+            "ca.key",
+            "-in",
+            "leaf.csr",
+            "-out",
+            "expired.crt",
+            "-startdate",
+            "20200101000000Z",
+            "-enddate",
+            "20210101000000Z",
+            "-extfile",
+            "ok.ext",
+            "-notext",
+        ],
+    );
     // Foglia corretta, ma firmata da una CA che il client non conosce.
     openssl(dir, &[&["req", "-x509"][..], &ec, &["-keyout", "ca2.key", "-out", "ca2.crt", "-days", "3650", "-subj", "/CN=unknown-ca"]].concat());
-    openssl(dir, &["x509", "-req", "-in", "leaf.csr", "-CA", "ca2.crt", "-CAkey", "ca2.key", "-set_serial", "4", "-days", "3650", "-extfile", "ok.ext", "-out", "foreign.crt"]);
+    openssl(
+        dir,
+        &[
+            "x509",
+            "-req",
+            "-in",
+            "leaf.csr",
+            "-CA",
+            "ca2.crt",
+            "-CAkey",
+            "ca2.key",
+            "-set_serial",
+            "4",
+            "-days",
+            "3650",
+            "-extfile",
+            "ok.ext",
+            "-out",
+            "foreign.crt",
+        ],
+    );
 }
 
 fn test_tls(dir: &Path) -> Tls {
@@ -186,7 +232,8 @@ async fn wallet_over_https() {
             let o = Command::new(env!("CARGO_BIN_EXE_centrifuga")).args(["wallet", "balance", "--config", &cfg]).output().unwrap();
             let err = String::from_utf8_lossy(&o.stderr);
             assert!(!o.status.success() && err.contains("plain http:// is allowed only to localhost"), "{rpc}: {err}");
-            let o = Command::new(env!("CARGO_BIN_EXE_centrifuga")).args(["wallet", "send", &to, "1", "--yes", "--config", &cfg, "--rpc", rpc]).output().unwrap();
+            let o =
+                Command::new(env!("CARGO_BIN_EXE_centrifuga")).args(["wallet", "send", &to, "1", "--yes", "--config", &cfg, "--rpc", rpc]).output().unwrap();
             assert!(!o.status.success());
         }
         assert_eq!(trap.accept().unwrap_err().kind(), ErrorKind::WouldBlock, "nessuna connessione al nodo http remoto");

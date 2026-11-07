@@ -116,7 +116,7 @@ impl Indexer {
     pub fn checkpoint(&mut self) -> Result<(), String> {
         self.archive.lock().unwrap().checkpoint().map_err(|e| format!("archivio: {e}"))?;
         let c = &self.chain;
-        ledger::write_snapshot(&self.state_dir, c.height, c.genesis_hash, c.svm.accounts().iter()).map_err(|e| format!("snapshot indexer: {e}"))
+        ledger::write_snapshot(&self.state_dir, c.height, c.genesis_hash, c.state_hash(), c.svm.accounts().iter()).map_err(|e| format!("snapshot indexer: {e}"))
     }
 
     /// Segue il journal: un blocco appena arriva, altrimenti attende.

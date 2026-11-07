@@ -17,6 +17,8 @@ pub struct Journal {
     file: File,
     /// Offset di fine file: dove inizierà il prossimo record.
     end: u64,
+    /// Durata dell'ultimo sync_data (solo misura).
+    pub last_sync: std::time::Duration,
 }
 
 impl Journal {
@@ -46,7 +48,7 @@ impl Journal {
             eprintln!("journal: truncating {} incomplete trailing bytes", total - good);
             file.set_len(good).map_err(|e| e.to_string())?;
         }
-        Ok(Journal { file, end: good })
+        Ok(Journal { file, end: good, last_sync: Default::default() })
     }
 
     /// Accoda un blocco e ne restituisce l'offset.
@@ -56,7 +58,9 @@ impl Journal {
         rec.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         rec.extend_from_slice(&bytes);
         self.file.write_all(&rec)?;
+        let t = std::time::Instant::now();
         self.file.sync_data()?;
+        self.last_sync = t.elapsed();
         let at = self.end;
         self.end += rec.len() as u64;
         Ok(at)
@@ -74,11 +78,14 @@ pub fn read_block_at(file: &mut File, offset: u64) -> Result<Block, String> {
     Block::decode(&buf)
 }
 
-const SNAP_MAGIC: &[u8; 8] = b"CNFASNP1";
+/// v2: l'header porta anche l'hash di stato (LtHash) dell'altezza dello snapshot.
+const SNAP_MAGIC: &[u8; 8] = b"CNFASNP2";
 
 pub struct Snapshot {
     pub height: u64,
     pub genesis_hash: Hash,
+    /// Hash di stato all'altezza dello snapshot: chi lo carica lo ricalcola e lo confronta.
+    pub state_hash: Hash,
     pub accounts: Vec<(Address, AccountSharedData)>,
 }
 
@@ -91,17 +98,67 @@ pub fn write_snapshot<'a>(
     dir: &Path,
     height: u64,
     genesis_hash: Hash,
+    state_hash: Hash,
     accounts: impl Iterator<Item = (&'a Address, &'a AccountSharedData)>,
 ) -> io::Result<()> {
     let mut sorted: Vec<_> = accounts.collect();
     sorted.sort_by_key(|(k, _)| **k);
     let tmp = dir.join("snapshot.tmp");
-    let mut w = BufWriter::new(File::create(&tmp)?);
-    w.write_all(SNAP_MAGIC)?;
-    w.write_all(&height.to_le_bytes())?;
-    w.write_all(genesis_hash.as_ref())?;
-    w.write_all(&(sorted.len() as u64).to_le_bytes())?;
+    write_snapshot_file(&tmp, height, genesis_hash, state_hash, sorted.into_iter())?;
+    fs::rename(&tmp, snapshot_path(dir))?;
+    File::open(dir)?.sync_all()
+}
+
+/// Scrive (con fsync) uno snapshot già ordinato per indirizzo in `path`.
+pub fn write_snapshot_file<'a>(
+    path: &Path,
+    height: u64,
+    genesis_hash: Hash,
+    state_hash: Hash,
+    sorted: impl ExactSizeIterator<Item = (&'a Address, &'a AccountSharedData)>,
+) -> io::Result<()> {
+    let mut w = SnapshotWriter::create(path, height, genesis_hash, state_hash, sorted.len() as u64)?;
     for (k, a) in sorted {
+        w.push(k, a)?;
+    }
+    w.finish()
+}
+
+/// Blocchi di scrittura dello snapshot: mai più di ~2 blocchi in sospeso nella cache del
+/// disco, così il sync_data del journal non aspetta GB di scritture dello snapshot.
+const SNAP_CHUNK: u64 = 8 << 20;
+
+/// Scrittura di uno snapshot un account alla volta, in ordine di indirizzo (lo stato
+/// ombra la interrompe per raccogliere i delta che arrivano nel frattempo). Ogni 8 MB:
+/// sync_file_range del blocco appena scritto (avvio) e attesa del precedente; con
+/// `with_rate`, una pausa per non superare i MB/s indicati.
+pub struct SnapshotWriter {
+    w: BufWriter<File>,
+    pos: u64,
+    synced: u64,
+    mb_s: u64,
+    started: std::time::Instant,
+}
+
+impl SnapshotWriter {
+    pub fn create(path: &Path, height: u64, genesis_hash: Hash, state_hash: Hash, count: u64) -> io::Result<SnapshotWriter> {
+        let mut w = BufWriter::with_capacity(1 << 20, File::create(path)?);
+        w.write_all(SNAP_MAGIC)?;
+        w.write_all(&height.to_le_bytes())?;
+        w.write_all(genesis_hash.as_ref())?;
+        w.write_all(state_hash.as_ref())?;
+        w.write_all(&count.to_le_bytes())?;
+        Ok(SnapshotWriter { w, pos: 88, synced: 0, mb_s: 0, started: std::time::Instant::now() })
+    }
+
+    /// Limite di banda della scrittura (0 = nessuno).
+    pub fn with_rate(mut self, mb_s: u64) -> SnapshotWriter {
+        self.mb_s = mb_s;
+        self
+    }
+
+    pub fn push(&mut self, k: &Address, a: &AccountSharedData) -> io::Result<()> {
+        let w = &mut self.w;
         w.write_all(k.as_ref())?;
         w.write_all(&a.lamports().to_le_bytes())?;
         w.write_all(a.owner().as_ref())?;
@@ -109,10 +166,41 @@ pub fn write_snapshot<'a>(
         w.write_all(&a.rent_epoch().to_le_bytes())?;
         w.write_all(&(a.data().len() as u64).to_le_bytes())?;
         w.write_all(a.data())?;
+        self.pos += 89 + a.data().len() as u64;
+        if self.pos - self.synced >= SNAP_CHUNK {
+            self.chunk()?;
+        }
+        Ok(())
     }
-    w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
-    fs::rename(&tmp, snapshot_path(dir))?;
-    File::open(dir)?.sync_all()
+
+    fn chunk(&mut self) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        self.w.flush()?;
+        let fd = self.w.get_ref().as_raw_fd();
+        let (start, len) = (self.synced as i64, (self.pos - self.synced) as i64);
+        // SAFETY: solo hint di scrittura sul file aperto; nessuna memoria coinvolta.
+        unsafe {
+            libc::sync_file_range(fd, start, len, libc::SYNC_FILE_RANGE_WRITE);
+            if start > 0 {
+                // Tutto ciò che precede il blocco appena avviato: già quasi tutto su disco.
+                let flags = libc::SYNC_FILE_RANGE_WAIT_BEFORE | libc::SYNC_FILE_RANGE_WRITE | libc::SYNC_FILE_RANGE_WAIT_AFTER;
+                libc::sync_file_range(fd, 0, start, flags);
+            }
+        }
+        self.synced = self.pos;
+        if self.mb_s > 0 {
+            let due = std::time::Duration::from_secs_f64(self.pos as f64 / (self.mb_s as f64 * 1e6));
+            if let Some(wait) = due.checked_sub(self.started.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush e fsync.
+    pub fn finish(self) -> io::Result<()> {
+        self.w.into_inner().map_err(|e| e.into_error())?.sync_all()
+    }
 }
 
 pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
@@ -124,6 +212,9 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
     let mut b8 = [0u8; 8];
     let mut b32 = [0u8; 32];
     r.read_exact(&mut b8)?;
+    if &b8 == b"CNFASNP1" {
+        return Err(io::Error::other("snapshot: format v1 (without state hash): delete it and restart from the journal"));
+    }
     if &b8 != SNAP_MAGIC {
         return Err(io::Error::other("snapshot: bad magic"));
     }
@@ -134,6 +225,8 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
     let height = u64_(&mut r)?;
     r.read_exact(&mut b32)?;
     let genesis_hash = Hash::new_from_array(b32);
+    r.read_exact(&mut b32)?;
+    let state_hash = Hash::new_from_array(b32);
     let n = u64_(&mut r)?;
     let mut accounts = Vec::with_capacity(n as usize);
     for _ in 0..n {
@@ -152,5 +245,5 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
         a.set_rent_epoch(rent_epoch);
         accounts.push((key, a));
     }
-    Ok(Some(Snapshot { height, genesis_hash, accounts }))
+    Ok(Some(Snapshot { height, genesis_hash, state_hash, accounts }))
 }

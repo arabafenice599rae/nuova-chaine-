@@ -141,4 +141,3 @@ pub fn verify(root: &H, k: &Address, a: &AccountSharedData, index: usize, sib: &
     }
     &h == root
 }
-

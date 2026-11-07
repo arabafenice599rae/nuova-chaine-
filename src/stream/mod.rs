@@ -17,7 +17,7 @@
 //! Un account con 0 lamport è cancellato. Il nodo non aspetta mai i client: chi
 //! resta indietro di più di `stream_max_lag_blocks` viene disconnesso.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +44,9 @@ use crate::rpc::encode::b64;
 /// smette di ricevere e il canale del nodo lo fa restare indietro.
 const SEND_BUFFER: u32 = 256 * 1024;
 
-type Accounts = Vec<(Address, Option<AccountSharedData>)>;
+/// Delta di un blocco: valore dopo il blocco di ogni account toccato; `None` = account
+/// chiuso o cancellato. Lo stesso delta va allo stream e allo stato ombra dello snapshot.
+pub type Accounts = Vec<(Address, Option<AccountSharedData>)>;
 
 fn account_json(k: &Address, a: Option<&AccountSharedData>) -> Value {
     match a {
@@ -74,14 +76,23 @@ fn snapshot(n: &Node, keys: impl IntoIterator<Item = Address>) -> Accounts {
     keys.into_iter().map(|k| (k, n.chain.svm.get(&k).cloned())).collect()
 }
 
+/// Delta del blocco appena eseguito (sul thread del nodo, subito dopo il blocco).
+pub fn block_delta(n: &Node, ex: &Executed) -> Accounts {
+    snapshot(n, ex.changed.iter().copied())
+}
+
 /// Messaggio "solo header e corpo" (come nel recupero dal journal).
 pub fn header_message(b: &Block) -> String {
     block_json(b, None).to_string()
 }
 
-/// Messaggio live per un blocco appena prodotto (sul thread del nodo).
+/// Messaggio live per un blocco appena prodotto (sul thread del nodo): lo stesso delta
+/// già calcolato per lo stato ombra, se è di questo blocco.
 pub fn block_message(n: &Node, ex: &Executed) -> String {
-    block_json(&ex.block, Some(&snapshot(n, ex.changed.iter().copied()))).to_string()
+    match &n.last_delta {
+        Some((h, d)) if *h == ex.block.header.height => block_json(&ex.block, Some(d)).to_string(),
+        _ => block_json(&ex.block, Some(&block_delta(n, ex))).to_string(),
+    }
 }
 
 #[derive(Clone)]
@@ -151,6 +162,7 @@ fn from_height(uri: &str) -> u64 {
     uri.split(['?', '&']).find_map(|p| p.strip_prefix("from_height=")).and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
+#[allow(clippy::result_large_err)] // callback di tungstenite
 async fn conn(s: Stream, c: tokio::net::TcpStream) {
     let mut from = 0;
     let cb = |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp| {
@@ -244,7 +256,8 @@ pub struct Replica {
     /// deve essere quello di identità e coincidere, altrimenti il nodo è rifiutato.
     pub expected_chain: Option<(String, Hash)>,
     chain_checked: bool,
-    accounts: HashMap<Address, AccountSharedData>,
+    /// Ordinata per indirizzo: lo stato ombra scrive lo snapshot senza ordinare le chiavi.
+    accounts: BTreeMap<Address, AccountSharedData>,
     /// LtHash di `accounts`, aggiornato con i soli account ricevuti.
     lt: LtState,
 }
@@ -276,7 +289,7 @@ impl Replica {
             max_future_ms: Some(5_000),
             expected_chain: None,
             chain_checked: false,
-            accounts: HashMap::new(),
+            accounts: BTreeMap::new(),
             lt: LtState::empty(),
         }
     }
@@ -293,7 +306,7 @@ impl Replica {
         if self.resync || (self.height == 0 && self.last_hash == Hash::default()) { 0 } else { self.height + 1 }
     }
 
-    pub fn accounts(&self) -> &HashMap<Address, AccountSharedData> {
+    pub fn accounts(&self) -> &BTreeMap<Address, AccountSharedData> {
         &self.accounts
     }
 
@@ -307,13 +320,26 @@ impl Replica {
         LtState::full(&self.accounts).hash()
     }
 
+    /// Nuovo valore di un account (`None` o 0 lamport = cancellato), con l'LtHash.
+    fn put(&mut self, k: Address, acc: Option<AccountSharedData>) {
+        match acc.filter(|a| a.lamports() > 0) {
+            Some(acc) => {
+                self.lt.replace(&k, self.accounts.get(&k), Some(&acc));
+                self.accounts.insert(k, acc);
+            }
+            None => {
+                let old = self.accounts.remove(&k);
+                self.lt.replace(&k, old.as_ref(), None);
+            }
+        }
+    }
+
     fn apply_accounts(&mut self, list: &Value) -> Result<(), String> {
         for a in list.as_array().ok_or("accounts")? {
             let k: Address = parse(a, "pubkey")?;
             let lamports = field(a, "lamports")?.as_u64().ok_or("lamports")?;
             if lamports == 0 {
-                let old = self.accounts.remove(&k);
-                self.lt.replace(&k, old.as_ref(), None);
+                self.put(k, None);
                 continue;
             }
             let data = decode64(field(a, "data")?.as_str().ok_or("data")?)?;
@@ -321,10 +347,44 @@ impl Replica {
             acc.set_data_from_slice(&data);
             acc.set_executable(field(a, "executable")?.as_bool().ok_or("executable")?);
             acc.set_rent_epoch(field(a, "rent_epoch")?.as_u64().ok_or("rent_epoch")?);
-            self.lt.replace(&k, self.accounts.get(&k), Some(&acc));
-            self.accounts.insert(k, acc);
+            self.put(k, Some(acc));
         }
         Ok(())
+    }
+
+    /// Replica di fiducia (stesso processo del nodo, nessuna firma da verificare) partita
+    /// dallo stato a `height` con hash di stato `state_hash`: la usa lo stato ombra dello
+    /// snapshot. L'LtHash completo si calcola qui, sul thread che la chiama.
+    pub fn from_state(
+        height: u64,
+        state_hash: Hash,
+        accounts: impl IntoIterator<Item = (Address, AccountSharedData)>,
+        rules: crate::exec::Rules,
+    ) -> Result<Replica, String> {
+        let accounts: BTreeMap<_, _> = accounts.into_iter().collect();
+        let lt = LtState::full(&accounts);
+        let mut r = Replica::new(Address::default(), rules);
+        (r.height, r.last_state, r.accounts, r.lt) = (height, state_hash, accounts, lt);
+        r.check_state()?;
+        Ok(r)
+    }
+
+    /// Delta di un blocco senza JSON (stessi valori dello stream): applica e verifica
+    /// che l'LtHash incrementale coincida con l'hash di stato del blocco.
+    pub fn apply_delta(&mut self, height: u64, state_hash: Hash, delta: &Accounts) -> Result<(), String> {
+        for (k, a) in delta {
+            self.put(*k, a.clone());
+        }
+        (self.height, self.last_state) = (height, state_hash);
+        self.check_state()
+    }
+
+    /// Solo per i test: cambia un account senza aggiornare l'LtHash (divergenza simulata).
+    #[doc(hidden)]
+    pub fn tamper(&mut self, k: &Address) {
+        if let Some(a) = self.accounts.get_mut(k) {
+            a.set_lamports(a.lamports() + 1);
+        }
     }
 
     fn check_state(&self) -> Result<(), String> {
@@ -340,10 +400,10 @@ impl Replica {
         let kind = field(&v, "type")?.as_str();
         if kind == Some("chain") {
             let got = (field(&v, "chainId")?.as_str().unwrap_or("").to_string(), parse::<Hash>(&v, "genesisHash")?);
-            if let Some(exp) = &self.expected_chain {
-                if &got != exp {
-                    return Err(format!("node of another chain: {} {} (expected {} {})", got.0, got.1, exp.0, exp.1));
-                }
+            if let Some(exp) = &self.expected_chain
+                && &got != exp
+            {
+                return Err(format!("node of another chain: {} {} (expected {} {})", got.0, got.1, exp.0, exp.1));
             }
             self.chain_checked = true;
             return Ok(());
@@ -378,10 +438,10 @@ impl Replica {
                     return Err(format!("block {}: invalid signature", block.header.height));
                 }
                 let h = &block.header;
-                if let Some(max) = self.max_future_ms {
-                    if h.timestamp_ms > crate::node::now_ms() + max {
-                        return Err(format!("block {}: timestamp in the future", h.height));
-                    }
+                if let Some(max) = self.max_future_ms
+                    && h.timestamp_ms > crate::node::now_ms() + max
+                {
+                    return Err(format!("block {}: timestamp in the future", h.height));
                 }
                 // Blocco concatenato (stesso prev_hash): valgono le regole di altezza e
                 // timestamp. Un blocco solo header con prev_hash diverso è una nuova ancora

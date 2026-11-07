@@ -49,7 +49,8 @@ fn run(name: &str) -> Run {
     cfg.node.data_dir = dir.join("node");
     cfg.node.snapshot_every = 7;
     cfg.node.rpc_recent_txs = 5;
-    cfg.indexer = Some(IndexerConfig { data_dir: dir.join("indexer"), rpc_addr: "127.0.0.1:0".into(), retention_blocks: 0, segment_txs: 10, snapshot_every: 9 });
+    cfg.indexer =
+        Some(IndexerConfig { data_dir: dir.join("indexer"), rpc_addr: "127.0.0.1:0".into(), retention_blocks: 0, segment_txs: 10, snapshot_every: 9 });
     let mut n = Node::open(cfg.clone(), Keypair::try_from(op.to_bytes().as_slice()).unwrap()).unwrap();
     let to = Address::new_unique();
     let (mut seen, mut a_sigs) = (vec![], vec![]);
@@ -99,7 +100,12 @@ fn ix_call(ix: &Indexer, m: &str, p: Value) -> Value {
 }
 
 fn history(ix: &Indexer, a: &Address, cfg: Value) -> Vec<String> {
-    ix_call(ix, "getSignaturesForAddress", json!([a.to_string(), cfg])).as_array().unwrap().iter().map(|x| x["signature"].as_str().unwrap().to_string()).collect()
+    ix_call(ix, "getSignaturesForAddress", json!([a.to_string(), cfg]))
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["signature"].as_str().unwrap().to_string())
+        .collect()
 }
 
 #[test]
@@ -128,7 +134,13 @@ fn indexer_matches_node() {
     drop(ix);
     // Arresto a metà scrittura: coda dell'archivio troncata, poi riregistrata.
     let arch = r.cfg.indexer.as_ref().unwrap().data_dir.join("archive");
-    let last = std::fs::read_dir(&arch).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "log")).max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap()).unwrap();
+    let last = std::fs::read_dir(&arch)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .max_by_key(|p| std::fs::metadata(p).unwrap().modified().unwrap())
+        .unwrap();
     let len = std::fs::metadata(&last).unwrap().len();
     std::fs::OpenOptions::new().write(true).open(&last).unwrap().set_len(len.saturating_sub(10)).unwrap();
     let ix = Indexer::open(&r.cfg, &journal).unwrap();

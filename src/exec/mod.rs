@@ -10,9 +10,9 @@ use solana_account::{Account, AccountSharedData, ReadableAccount};
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_keypair::Keypair;
+use solana_message::VersionedMessage;
 use solana_nonce::state::{Data, DurableNonce, State};
 use solana_nonce::versions::Versions;
-use solana_message::VersionedMessage;
 use solana_sdk_ids::{ed25519_program, secp256k1_program, secp256r1_program, system_program, sysvar};
 use solana_signature::Signature;
 use solana_transaction::versioned::VersionedTransaction;
@@ -85,8 +85,13 @@ impl Params {
         let mut d = Sha256::new();
         d.update(self.operator.as_ref());
         for x in [
-            self.lamports_per_signature, self.blockhash_window as u64, self.block_budget, self.halving_blocks,
-            self.mining_end_height, self.rules.slot_ms, self.rules.heartbeat_slots,
+            self.lamports_per_signature,
+            self.blockhash_window as u64,
+            self.block_budget,
+            self.halving_blocks,
+            self.mining_end_height,
+            self.rules.slot_ms,
+            self.rules.heartbeat_slots,
         ] {
             d.update(x.to_le_bytes());
         }
@@ -220,13 +225,7 @@ impl Chain {
         let params_hash = params.hash();
         let mut c = Chain::new(svm, params, 0, Hash::default(), timestamp_ms, Hash::default());
         let g = Block {
-            header: Header {
-                height: 0,
-                prev_hash: params_hash,
-                timestamp_ms,
-                state_hash: c.state_hash(),
-                signature: Signature::default(),
-            },
+            header: Header { height: 0, prev_hash: params_hash, timestamp_ms, state_hash: c.state_hash(), signature: Signature::default() },
             txs: vec![],
         };
         let h = g.hash();
@@ -365,10 +364,7 @@ impl Chain {
             return;
         }
         self.touch(to);
-        let mut acc: Account = self.svm.get(&to).cloned().map(Into::into).unwrap_or(Account {
-            owner: system_program::id(),
-            ..Account::default()
-        });
+        let mut acc: Account = self.svm.get(&to).cloned().map(Into::into).unwrap_or(Account { owner: system_program::id(), ..Account::default() });
         acc.lamports += lamports;
         self.svm.set(to, acc);
         changed.insert(to);
@@ -490,10 +486,8 @@ impl Chain {
         self.lt.update(&before, self.svm.accounts());
         changed.extend(before.keys()); // il delta dello stream copre ogni account toccato
         let state_hash = self.lt.hash();
-        let block = Block {
-            header: Header { height, prev_hash: self.last_hash, timestamp_ms: ts, state_hash, signature: Signature::default() },
-            txs: included,
-        };
+        let block =
+            Block { header: Header { height, prev_hash: self.last_hash, timestamp_ms: ts, state_hash, signature: Signature::default() }, txs: included };
         // `seen` ha già le firme del blocco: push_window le registra per la scadenza.
         for s in &sigs {
             self.seen.remove(s);

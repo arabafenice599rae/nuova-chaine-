@@ -64,9 +64,8 @@ pub fn ui_amount(amount: u64, decimals: u8) -> Value {
 /// (mint, owner, amount) di un token account SPL.
 pub fn token_account(a: &AccountSharedData) -> Option<(Address, Address, u64)> {
     let d = a.data();
-    (token_program(a.owner()).is_some() && is_token_account(d)).then(|| {
-        (Address::try_from(&d[..32]).unwrap(), Address::try_from(&d[32..64]).unwrap(), u64_at(d, 64))
-    })
+    (token_program(a.owner()).is_some() && is_token_account(d))
+        .then(|| (Address::try_from(&d[..32]).unwrap(), Address::try_from(&d[32..64]).unwrap(), u64_at(d, 64)))
 }
 
 pub fn mint_decimals(svm: &Svm, mint: &Address) -> Option<u8> {
@@ -136,7 +135,7 @@ pub fn account(svm: &Svm, a: &AccountSharedData, enc: Option<&str>, slice: Optio
         None | Some("binary") => json!(b58(d)),
         Some("base58") => json!([b58(d), "base58"]),
         Some("base64") => json!([b64(d), "base64"]),
-        Some("base64+zstd") => json!([b64(&zstd_raw(d)), "base64+zstd"]),
+        Some("base64+zstd") => json!([b64(zstd_raw(d)), "base64+zstd"]),
         Some("jsonParsed") => parsed(svm, a).unwrap_or_else(|| json!([b64(d), "base64"])),
         Some(e) => return Err(format!("unsupported encoding: {e}")),
     };

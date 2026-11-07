@@ -78,7 +78,10 @@ fn run(args: &[String], tls: Tls) -> Result<(), String> {
     let w = Wallet { rpc, keypair, conf, yes, tls };
     match pos.as_slice() {
         ["new"] => w.new_key(),
-        ["address"] => Ok(say(w.key()?.pubkey().to_string())),
+        ["address"] => {
+            let _: () = say(w.key()?.pubkey().to_string());
+            Ok(())
+        }
         ["balance", rest @ ..] if rest.len() <= 1 => w.balance(rest.first().copied()),
         ["send", to, amount] => w.send(to, amount),
         ["token-send", mint, to, amount] => w.token_send(mint, to, amount),

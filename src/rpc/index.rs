@@ -3,6 +3,7 @@
 //!     getSignatureStatuses e coprono la scadenza dei blockhash; si salvano accanto
 //!     allo snapshot (status.bin, limitato alla finestra), così un riavvio non li perde;
 //!   - record completi delle ultime `rpc_recent_txs` tx, per getTransaction.
+//!
 //! Lo storico completo non sta nel nodo: lo serve l'indexer (`centrifuga indexer`).
 
 use std::collections::{HashMap, VecDeque};
@@ -43,15 +44,29 @@ impl TxIndex {
 
     pub fn record(&mut self, ex: &Executed, node_us: impl Fn(&Signature) -> Option<u64>) {
         let h = ex.block.header.height;
-        let mut sigs = Vec::with_capacity(ex.block.txs.len());
+        let mut statuses = Vec::with_capacity(ex.block.txs.len());
         for rec in records_of(ex, node_us) {
             let s = rec.tx.signatures[0];
-            sigs.push(s);
-            self.statuses.insert(s, (rec.slot, rec.err.clone()));
+            statuses.push((s, rec.err.clone()));
             if self.max_records > 0 {
                 self.order.push_back(s);
                 self.records.insert(s, rec);
             }
+        }
+        self.record_statuses(h, statuses);
+        while self.order.len() > self.max_records {
+            let s = self.order.pop_front().unwrap();
+            self.records.remove(&s);
+        }
+    }
+
+    /// Solo gli stati di un blocco (firma, errore): la finestra di `status.bin`. Lo usa
+    /// anche lo stato ombra dello snapshot, che ne tiene una copia propria.
+    pub fn record_statuses(&mut self, h: u64, statuses: Vec<(Signature, Option<TransactionError>)>) {
+        let mut sigs = Vec::with_capacity(statuses.len());
+        for (s, err) in statuses {
+            sigs.push(s);
+            self.statuses.insert(s, (h, err));
         }
         self.count += sigs.len() as u64;
         self.by_height.push_back((h, sigs));
@@ -60,10 +75,11 @@ impl TxIndex {
                 self.statuses.remove(&s);
             }
         }
-        while self.order.len() > self.max_records {
-            let s = self.order.pop_front().unwrap();
-            self.records.remove(&s);
-        }
+    }
+
+    /// Stati di un blocco già eseguito (per lo stato ombra).
+    pub fn statuses_of(ex: &Executed) -> Vec<(Signature, Option<TransactionError>)> {
+        ex.block.txs.iter().zip(&ex.results).map(|(t, r)| (t.signatures[0], r.as_ref().err().map(|f| f.err.clone()))).collect()
     }
 
     pub fn status(&self, sig: &Signature) -> Option<&(u64, Option<TransactionError>)> {
@@ -84,6 +100,15 @@ impl TxIndex {
 
     /// Accanto allo snapshot: contatore e stati della finestra (non lo storico).
     pub fn save(&self, dir: &Path, height: u64) -> io::Result<()> {
+        let tmp = dir.join("status.tmp");
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&self.encode(height))?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, dir.join("status.bin"))
+    }
+
+    /// Contenuto di `status.bin` per lo snapshot all'altezza `height`.
+    pub fn encode(&self, height: u64) -> Vec<u8> {
         let mut w = W(Vec::new());
         w.u64(height);
         w.u64(self.count);
@@ -98,18 +123,19 @@ impl TxIndex {
                 w.bytes(&err.as_ref().map(|e| serde_json::to_vec(e).unwrap()).unwrap_or_default());
             }
         }
-        let tmp = dir.join("status.tmp");
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&w.0)?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, dir.join("status.bin"))
+        w.0
     }
 
     /// Stati salvati con lo snapshot all'altezza `height` (i blocchi successivi arrivano
     /// dal journal). Un file di un altro snapshot si ignora.
     pub fn load(&mut self, dir: &Path, height: u64) -> io::Result<()> {
         let Ok(b) = std::fs::read(dir.join("status.bin")) else { return Ok(()) };
-        let mut r = R(&b);
+        self.decode(&b, height)
+    }
+
+    /// Stati da un contenuto di `status.bin` (ignorato se di un'altra altezza).
+    pub fn decode(&mut self, b: &[u8], height: u64) -> io::Result<()> {
+        let mut r = R(b);
         if r.u64()? != height {
             return Ok(());
         }

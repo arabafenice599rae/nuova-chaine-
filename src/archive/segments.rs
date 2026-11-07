@@ -132,10 +132,8 @@ fn lookup(f: &File, n: u64, w: usize, key: &[u8]) -> Vec<u64> {
 impl Segments {
     pub fn open(dir: &Path, segment_txs: u64) -> io::Result<Segments> {
         std::fs::create_dir_all(dir)?;
-        let mut firsts: Vec<u64> = std::fs::read_dir(dir)?
-            .flatten()
-            .filter_map(|e| e.file_name().to_str()?.strip_prefix("seg-")?.strip_suffix(".log")?.parse().ok())
-            .collect();
+        let mut firsts: Vec<u64> =
+            std::fs::read_dir(dir)?.flatten().filter_map(|e| e.file_name().to_str()?.strip_prefix("seg-")?.strip_suffix(".log")?.parse().ok()).collect();
         firsts.sort();
         let active = firsts.pop().unwrap_or(1);
         let mut s = Segments {
@@ -293,7 +291,7 @@ impl Archive for Segments {
 
     fn prune(&mut self, height: u64) -> io::Result<()> {
         // Un segmento chiuso si elimina se il successivo comincia entro `height`.
-        while self.sealed.len() > 0 {
+        while !self.sealed.is_empty() {
             let next_first = self.sealed.get(1).map_or(self.first, |s| s.first);
             if next_first > height {
                 break;

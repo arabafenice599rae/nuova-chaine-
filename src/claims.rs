@@ -36,11 +36,7 @@ pub struct Eligibility {
 
 /// Lista airdrop: una pubkey per riga, `#` per i commenti.
 pub fn parse_list(text: &str) -> Result<BTreeSet<Address>, String> {
-    text.lines()
-        .map(|l| l.split('#').next().unwrap().trim())
-        .filter(|l| !l.is_empty())
-        .map(genesis::parse_address)
-        .collect()
+    text.lines().map(|l| l.split('#').next().unwrap().trim()).filter(|l| !l.is_empty()).map(genesis::parse_address).collect()
 }
 
 /// Riesegue il journal dal genesis fino alla fine del fee mining.
@@ -68,13 +64,10 @@ pub fn compute(g: &GenesisConfig, journal: &Path, airdrop: &BTreeSet<Address>) -
         Ok(())
     })?;
     let (end_height, residual) = end.ok_or("fee mining has not ended yet in the journal")?;
-    let eligible: Vec<Address> = stats
-        .into_iter()
-        .filter(|(k, (n, days))| *n >= MIN_TX && days.len() >= MIN_DAYS && airdrop.contains(k))
-        .map(|(k, _)| k)
-        .collect();
+    let eligible: Vec<Address> =
+        stats.into_iter().filter(|(k, (n, days))| *n >= MIN_TX && days.len() >= MIN_DAYS && airdrop.contains(k)).map(|(k, _)| k).collect();
     let n = eligible.len() as u64;
-    let quota = if n == 0 { 0 } else { MAX_QUOTA.min(residual / n) };
+    let quota = residual.checked_div(n).map_or(0, |q| MAX_QUOTA.min(q));
     Ok(Eligibility { end_height, residual, quota, unassigned: residual - quota * n, eligible })
 }
 

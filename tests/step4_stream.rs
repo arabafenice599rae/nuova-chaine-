@@ -118,10 +118,10 @@ async fn replica_rebuilds_state_from_stream_only() {
     let (mut ws, _) = tokio_tungstenite::connect_async(&url3).await.unwrap();
     let mut refused = None;
     while let Some(Ok(m)) = ws.next().await {
-        if let Message::Text(t) = m {
-            if let Err(e) = rep.apply(&t) {
-                refused = Some(e);
-            }
+        if let Message::Text(t) = m
+            && let Err(e) = rep.apply(&t)
+        {
+            refused = Some(e);
         }
     }
     assert!(refused.unwrap().contains(centrifuga::stream::OUT_OF_WINDOW));

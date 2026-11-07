@@ -55,7 +55,11 @@ fn write_key(path: &Path, k: &Keypair) {
 
 fn conf(dir: &Path, chain_id: &str, hash: &str) {
     let key = dir.join("user.json");
-    std::fs::write(dir.join("wallet.toml"), format!("rpc = \"{URL}\"\nkeypair = \"{}\"\nchain_id = \"{chain_id}\"\ngenesis_hash = \"{hash}\"\n", key.display())).unwrap();
+    std::fs::write(
+        dir.join("wallet.toml"),
+        format!("rpc = \"{URL}\"\nkeypair = \"{}\"\nchain_id = \"{chain_id}\"\ngenesis_hash = \"{hash}\"\n", key.display()),
+    )
+    .unwrap();
 }
 
 /// Transazione preparata dal test (mint SPL), inviata e attesa.

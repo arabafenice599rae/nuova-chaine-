@@ -133,7 +133,7 @@ fn future_timestamp_rejected_only_by_realtime_replica() {
     let mut ch = chain(&c);
     let b1 = ch.produce_at(1, vec![], node::now_ms(), &op).block;
     let b2 = ch.produce_at(2, vec![], node::now_ms() + 60_000, &op).block; // blocco valido, 60 s nel futuro
-    let [apply, journal, replica] = three_ways(&c, &op, &[b1.clone()], &b2, "futuro");
+    let [apply, journal, replica] = three_ways(&c, &op, std::slice::from_ref(&b1), &b2, "futuro");
     apply.unwrap();
     journal.unwrap();
     assert!(replica.unwrap_err().contains("in the future"), "replica in tempo reale");

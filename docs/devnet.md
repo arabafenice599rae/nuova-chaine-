@@ -109,3 +109,22 @@ Sul VPS:
 cut -d' ' -f2- /var/lib/centrifuga/data/rpc.log | sort | uniq -c | sort -rn   # metodi ricevuti, con esito
 grep UNSUPPORTED /var/lib/centrifuga/data/rpc.log | cut -d' ' -f2,3 | sort -u
 ```
+
+## Disco: snapshot e journal
+
+Il journal fa un `sync_data` a ogni blocco; lo snapshot scrive in background ~100 byte
+per account (1 GB a 10 milioni). Perché il `sync_data` del journal non aspetti le
+scritture dello snapshot:
+- lo snapshot scrive a blocchi da 8 MB e li manda su disco man mano (`sync_file_range`):
+  non restano mai più di ~16 MB in sospeso;
+- `snapshot_mb_s` (default 100) limita la banda della scrittura;
+- sul sistema, limiti bassi alle pagine sporche in attesa:
+
+```sh
+sudo sysctl -w vm.dirty_background_bytes=16777216   # 16 MB: la scrittura parte subito
+sudo sysctl -w vm.dirty_bytes=67108864              # 64 MB: oltre, chi scrive aspetta
+# permanenti: le stesse due righe (senza sudo sysctl -w) in /etc/sysctl.d/90-centrifuga.conf
+```
+
+Meglio ancora: snapshot e journal su dischi separati, così le scritture dello snapshot
+non passano dalla stessa coda del disco del journal.

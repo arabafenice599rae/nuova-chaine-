@@ -98,12 +98,8 @@ fn mainnet_allocation_is_fixed() {
     assert_eq!(vault("reserve") + s.system_lamports, 45_000_000 * LAMPORTS_PER_CNFA, "riserva = 45M - account di sistema");
     assert_eq!(c.total_lamports(), SUPPLY_LAMPORTS as u128);
     // Ogni importo diverso da 20M / 30M / 5M è rifiutato.
-    let changes: [fn(&mut genesis::GenesisConfig); 4] = [
-        |g| g.operator_cnfa = 20_000_000,
-        |g| g.operator_cnfa = 4_999_999,
-        |g| g.airdrop_cnfa += 1,
-        |g| g.mining_cnfa -= 1,
-    ];
+    let changes: [fn(&mut genesis::GenesisConfig); 4] =
+        [|g| g.operator_cnfa = 20_000_000, |g| g.operator_cnfa = 4_999_999, |g| g.airdrop_cnfa += 1, |g| g.mining_cnfa -= 1];
     for f in changes {
         let mut g = base.clone();
         f(&mut g);
@@ -268,8 +264,7 @@ fn spl_token_programs_are_live() {
     for token in ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"] {
         let token = genesis::parse_address(token).unwrap();
         let mint = Keypair::new();
-        let create = solana_system_interface::instruction::create_account(
-            &payer.pubkey(), &mint.pubkey(), c.svm.rent_exempt(82), 82, &token);
+        let create = solana_system_interface::instruction::create_account(&payer.pubkey(), &mint.pubkey(), c.svm.rent_exempt(82), 82, &token);
         let mut data = vec![20, 9];
         data.extend_from_slice(payer.pubkey().as_ref());
         data.push(0);
