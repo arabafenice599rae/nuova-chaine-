@@ -279,7 +279,7 @@ async fn node_produces_on_demand_with_heartbeat() {
     }
 
     // Con una tx: blocco allo slot successivo, non all'heartbeat. Si misura l'esecuzione
-    // (altezza eseguita): la durabilità dipende dal disco e si controlla dopo, senza tempo.
+    // (altezza eseguita): la durabilità dipende dal disco e si controlla dopo, entro 10 s.
     let (_, bh, n0) = state().await;
     let tx = transfer_tx(&user, &Address::new_unique(), LAMPORTS_PER_CNFA, bh);
     let t = Instant::now();
@@ -290,6 +290,7 @@ async fn node_produces_on_demand_with_heartbeat() {
     }
     assert!(t.elapsed() < Duration::from_millis(100), "blocco della tx eseguito in {:?} (slot 20 ms, heartbeat 200 ms)", t.elapsed());
     while state().await.2 == n0 {
+        assert!(t.elapsed() < Duration::from_secs(10), "tx mai durevole");
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 }
