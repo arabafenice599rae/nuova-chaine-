@@ -278,13 +278,18 @@ async fn node_produces_on_demand_with_heartbeat() {
         assert_eq!(w[1] - w[0], 10, "senza tx il salto è heartbeat_slots: {heights:?}");
     }
 
-    // Con una tx: blocco allo slot successivo, non all'heartbeat.
+    // Con una tx: blocco allo slot successivo, non all'heartbeat. Si misura l'esecuzione
+    // (altezza eseguita): la durabilità dipende dal disco e si controlla dopo, senza tempo.
     let (_, bh, n0) = state().await;
     let tx = transfer_tx(&user, &Address::new_unique(), LAMPORTS_PER_CNFA, bh);
     let t = Instant::now();
-    assert!(gw.query(move |n: &mut Node| n.ingress.submit(None, vec![tx])).await.unwrap()[0].is_ok());
+    let h0 = gw.query(move |n: &mut Node| (n.ingress.submit(None, vec![tx])[0].is_ok(), n.chain.height)).await.unwrap();
+    assert!(h0.0);
+    while state().await.0 == h0.1 {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(t.elapsed() < Duration::from_millis(100), "blocco della tx eseguito in {:?} (slot 20 ms, heartbeat 200 ms)", t.elapsed());
     while state().await.2 == n0 {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    assert!(t.elapsed() < Duration::from_millis(100), "tx inclusa in {:?} (slot 20 ms, heartbeat 200 ms)", t.elapsed());
 }
