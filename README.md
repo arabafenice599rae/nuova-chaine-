@@ -236,7 +236,7 @@ che il blocco è durevole:
   `journal_queue_blocks` blocchi avanti. **Dopo un crash queste letture possono tornare
   indietro di al massimo `journal_queue_blocks` blocchi; conferme e blocchi mai.**
 
-Il gateway (`src/rpc/`) è solo un adattatore per i wallet: HTTP su `rpc_addr`
+Il gateway (`node/src/rpc/`) è solo un adattatore per i wallet: HTTP su `rpc_addr`
 (default `127.0.0.1:8899`), WebSocket sulla porta successiva (8900), come si
 aspettano i client Solana. I metodi girano sul thread del nodo tra un blocco e
 l'altro: niente lock, risposte sempre coerenti con l'ultimo blocco.
@@ -278,7 +278,7 @@ endpoint HTTPS pubblico, prefund, latenza).
 
 ## Stream
 
-L'API principale per bot e repliche (`src/stream/`): WebSocket su `stream_addr`
+L'API principale per bot e repliche (`node/src/stream/`): WebSocket su `stream_addr`
 (default `127.0.0.1:8901`), un messaggio JSON per frame.
 
 - A ogni blocco: `{"type":"block", "header":{height, prev_hash, timestamp_ms,
@@ -364,7 +364,7 @@ il `.so` committato (`scripts/check-timelock-hash.sh`).
 ## Stack
 
 - Esecuzione: [`litesvm`](https://crates.io/crates/litesvm) `=0.18.2`; tutte le chiamate
-  in `src/exec/litesvm_internal.rs`.
+  in `node/src/exec/litesvm_internal.rs`.
 - Firme: verifica ed25519 in batch (`ed25519-dalek`) all'ingresso e in riesecuzione.
 - Nessun database: journal + snapshot.
 - Rete: tokio, hyper (HTTP/1), tokio-tungstenite (WebSocket).
@@ -373,19 +373,28 @@ il `.so` committato (`scripts/check-timelock-hash.sh`).
 
 ## Struttura
 
+Due crate nello stesso workspace e un solo binario, `centrifuga`:
+
 ```
-src/main.rs        CLI (genesis, run, balance, eligible, wallet)
-src/wallet.rs      wallet a riga di comando (verifica l'identità del nodo)
+node/              crate centrifuga-node: tutto ciò che gira nel nodo
+  src/node.rs        apertura (snapshot + journal), ciclo di slot, thread del journal
+  src/shadow.rs      stato ombra e snapshot in background
+  src/stream/        stream WebSocket per bot e repliche, `Replica` che verifica tutto
+  src/rpc/           gateway JSON-RPC + WebSocket per i wallet
+  src/exec/          esecuzione blocchi, finestra blockhash, nonce, StateHasher
+  src/ledger/        blocco, journal, snapshot
+  src/ingress/       verifica firme batch, seq, coda FIFO
+  src/genesis/       config TOML, stato iniziale, verifiche
+  src/archive/       formato dei record delle tx (indice RPC e archivio dell'indexer)
+src/               crate centrifuga: CLI e strumenti
+  main.rs            CLI (genesis, run, balance, eligible, wallet, indexer)
+  wallet.rs          wallet a riga di comando (verifica l'identità del nodo)
+  client.rs          client JSON-RPC (HTTPS con rustls)
+  indexer.rs         indexer: storico letto dal journal del nodo
+  segments.rs        archivio a segmenti append-only dell'indexer
+  claims.rs          aventi diritto al residuo del fee mining (off-chain)
 deploy/            installazione devnet su VPS (systemd, HTTPS)
-src/stream/        stream WebSocket per bot e repliche, `Replica` che verifica tutto
-src/rpc/           gateway JSON-RPC + WebSocket per i wallet
-src/node.rs        apertura (snapshot + journal), ciclo di slot
-src/exec/          esecuzione blocchi, finestra blockhash, nonce, StateHasher
-src/ledger/        blocco, journal, snapshot
-src/ingress/       verifica firme batch, seq, coda FIFO
-src/genesis/       config TOML, stato iniziale, verifiche
 programs/timelock/ programma on-chain dei vault (+ .so compilato)
-src/claims.rs      aventi diritto al residuo del fee mining (off-chain)
 ```
 
 ## Stato

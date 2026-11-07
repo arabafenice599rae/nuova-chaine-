@@ -1,7 +1,6 @@
 //! Gateway JSON-RPC per i wallet (HTTP) + WebSocket (accountSubscribe,
 //! signatureSubscribe). Solo trasporto: i metodi stanno in `methods.rs`.
 
-pub mod client;
 pub mod encode;
 pub mod index;
 pub mod methods;

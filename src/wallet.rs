@@ -17,9 +17,9 @@ use solana_message::{Message, VersionedMessage};
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
+use crate::client::{Tls, call_with, public_tls};
 use crate::genesis::parse_address;
 use crate::node::{fmt_amount, read_keypair};
-use crate::rpc::client::{Tls, call_with, public_tls};
 use crate::rpc::encode::{TOKEN, TOKEN_2022, ui_string};
 
 const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
@@ -139,7 +139,7 @@ impl Wallet {
         let (Some(id), Some(gh)) = (&self.conf.chain_id, &self.conf.genesis_hash) else {
             return Err("wallet.toml must set chain_id and genesis_hash".into());
         };
-        crate::rpc::client::endpoint(&url)?;
+        crate::client::endpoint(&url)?;
         let info = self.call(&url, "getChainInfo", json!([]))?;
         if info["chainId"] != id.as_str() || info["genesisHash"] != gh.as_str() {
             let got = |k: &str| info[k].as_str().unwrap_or("?").to_string();

@@ -21,14 +21,14 @@
 //! I lamport escono solo se resta il minimo per la rent exemption: il limite è il
 //! saldo reale del vault, non un totale fisso.
 
+use pinocchio::ProgramResult;
 use pinocchio::account_info::AccountInfo;
 use pinocchio::program_error::ProgramError;
 use pinocchio::pubkey::Pubkey;
+use pinocchio::sysvars::Sysvar;
 use pinocchio::sysvars::clock::Clock;
 use pinocchio::sysvars::instructions::Instructions;
 use pinocchio::sysvars::rent::Rent;
-use pinocchio::sysvars::Sysvar;
-use pinocchio::ProgramResult;
 
 #[cfg(target_os = "solana")]
 pinocchio::entrypoint!(process);
@@ -44,10 +44,8 @@ pub const MINING: u8 = 3;
 pub const RESERVE: u8 = 4;
 
 /// Ed25519SigVerify111111111111111111111111111
-const ED25519_PROGRAM: Pubkey = [
-    3, 125, 70, 214, 124, 147, 251, 190, 18, 249, 66, 143, 131, 141, 64, 255, 5, 112, 116, 73, 39, 244, 138, 100,
-    252, 202, 112, 68, 128, 0, 0, 0,
-];
+const ED25519_PROGRAM: Pubkey =
+    [3, 125, 70, 214, 124, 147, 251, 190, 18, 249, 66, 143, 131, 141, 64, 255, 5, 112, 116, 73, 39, 244, 138, 100, 252, 202, 112, 68, 128, 0, 0, 0];
 
 /// Errori propri (ProgramError::Custom).
 #[repr(u32)]
@@ -230,9 +228,6 @@ fn verify_signature(ixs: &AccountInfo, authority: &Pubkey, msg: &[u8]) -> Progra
     // Offsets: firma, ix firma, chiave, ix chiave, messaggio, lunghezza, ix messaggio.
     let (pk, msg_off, msg_len) = (u16_at(6), u16_at(10), u16_at(12));
     let same_ix = [4, 8, 14].iter().all(|o| u16_at(*o) == u16::MAX as usize);
-    let ok = same_ix
-        && d.get(pk..pk + 32) == Some(&authority[..])
-        && msg_len == msg.len()
-        && d.get(msg_off..msg_off + msg_len) == Some(msg);
+    let ok = same_ix && d.get(pk..pk + 32) == Some(&authority[..]) && msg_len == msg.len() && d.get(msg_off..msg_off + msg_len) == Some(msg);
     if ok { Ok(()) } else { Err(Error::BadSignature.into()) }
 }

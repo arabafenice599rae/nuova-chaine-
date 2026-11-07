@@ -36,7 +36,7 @@
 
 ## Archivio: confronto e scelta
 
-**Scelto: file di segmenti append-only** (`src/archive/segments.rs`). Gli altri due
+**Scelto: file di segmenti append-only** (`src/segments.rs`). Gli altri due
 sono stati rimossi dopo il confronto: l'archivio a pagine scritto a mano e `redb` 4.4.0
 (feature `redb-archive`).
 

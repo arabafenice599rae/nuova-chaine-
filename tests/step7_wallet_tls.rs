@@ -9,9 +9,9 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use centrifuga::client::{Endpoint, Tls, call_with, endpoint, tls_with};
 use centrifuga::genesis::{self, Config, LAMPORTS_PER_CNFA, Prefund};
 use centrifuga::node;
-use centrifuga::rpc::client::{Endpoint, Tls, call_with, endpoint, tls_with};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::json;

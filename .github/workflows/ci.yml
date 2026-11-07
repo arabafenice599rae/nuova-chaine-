@@ -21,8 +21,8 @@ jobs:
           key: node-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       # rust-toolchain.toml installa la versione fissata (1.97.1).
       - run: rustup component add clippy rustfmt
-      - run: cargo fmt --check
-      - run: cargo clippy --release --locked --all-targets -- -D warnings
+      - run: cargo fmt --all --check
+      - run: cargo clippy --release --locked --workspace --all-targets -- -D warnings
       - run: cargo build --release --bins --examples
       - run: cargo test --release
       - name: THIRD_PARTY_NOTICES allineato a Cargo.lock

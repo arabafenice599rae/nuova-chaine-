@@ -26,7 +26,7 @@ fn pct(v: &mut [f64], q: f64) -> f64 {
 
 fn open(kind: &str, dir: &Path) -> Box<dyn Archive> {
     match kind {
-        "segments" => Box::new(centrifuga::archive::segments::Segments::open(dir, 1_000_000).unwrap()),
+        "segments" => Box::new(centrifuga::segments::Segments::open(dir, 1_000_000).unwrap()),
         _ => panic!("{kind}"),
     }
 }

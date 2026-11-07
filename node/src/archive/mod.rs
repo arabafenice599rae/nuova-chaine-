@@ -3,8 +3,6 @@
 //! scelto dopo il confronto con un archivio a pagine scritto a mano e con redb
 //! (docs/history.md).
 
-pub mod segments;
-
 use std::io;
 
 use solana_address::Address;

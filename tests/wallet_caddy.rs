@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use centrifuga::rpc::client::{call_with, tls_with};
+use centrifuga::client::{call_with, tls_with};
 use rustls::pki_types::CertificateDer;
 use rustls::pki_types::pem::PemObject;
 use serde_json::json;

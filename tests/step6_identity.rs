@@ -6,10 +6,10 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use centrifuga::client::call;
 use centrifuga::exec::Chain;
 use centrifuga::genesis::{self, Config, LAMPORTS_PER_CNFA, Prefund, transfer_tx};
 use centrifuga::node;
-use centrifuga::rpc::client::call;
 use centrifuga::stream::Replica;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
