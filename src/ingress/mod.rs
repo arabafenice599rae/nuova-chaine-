@@ -26,10 +26,7 @@ pub fn verify_signatures(txs: &[VersionedTransaction]) -> Vec<bool> {
             spans.push(None);
             continue;
         }
-        let parsed: Option<Vec<_>> = ks[..need]
-            .iter()
-            .map(|k| VerifyingKey::from_bytes(&k.to_bytes()).ok().filter(|k| !k.is_weak()))
-            .collect();
+        let parsed: Option<Vec<_>> = ks[..need].iter().map(|k| VerifyingKey::from_bytes(&k.to_bytes()).ok().filter(|k| !k.is_weak())).collect();
         let Some(parsed) = parsed else {
             spans.push(None);
             continue;
@@ -47,12 +44,7 @@ pub fn verify_signatures(txs: &[VersionedTransaction]) -> Vec<bool> {
     if !sigs.is_empty() && ed25519_dalek::verify_batch(&refs, &sigs, &keys).is_ok() {
         return spans.iter().map(Option::is_some).collect();
     }
-    spans
-        .iter()
-        .map(|sp| {
-            sp.is_some_and(|(a, b)| (a..b).all(|i| ed25519_dalek::Verifier::verify(&keys[i], refs[i], &sigs[i]).is_ok()))
-        })
-        .collect()
+    spans.iter().map(|sp| sp.is_some_and(|(a, b)| (a..b).all(|i| ed25519_dalek::Verifier::verify(&keys[i], refs[i], &sigs[i]).is_ok()))).collect()
 }
 
 /// Limiti di ingresso (dalla config del nodo).

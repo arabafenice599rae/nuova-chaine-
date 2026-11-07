@@ -72,10 +72,17 @@ fn nonce_value(c: &Chain, k: &Address) -> Hash {
 /// Stato completo per la replica, nel formato dello stream.
 fn full_sync(c: &Chain) -> String {
     let b64 = |d: &[u8]| base64::engine::general_purpose::STANDARD.encode(d);
-    let accounts: Vec<_> = c.svm.accounts().iter().map(|(k, a)| json!({
-        "pubkey": k.to_string(), "lamports": a.lamports(), "owner": a.owner().to_string(),
-        "data": b64(a.data()), "executable": a.executable(), "rent_epoch": a.rent_epoch(),
-    })).collect();
+    let accounts: Vec<_> = c
+        .svm
+        .accounts()
+        .iter()
+        .map(|(k, a)| {
+            json!({
+                "pubkey": k.to_string(), "lamports": a.lamports(), "owner": a.owner().to_string(),
+                "data": b64(a.data()), "executable": a.executable(), "rent_epoch": a.rent_epoch(),
+            })
+        })
+        .collect();
     json!({"type": "sync", "height": c.height, "full": true, "accounts": accounts}).to_string()
 }
 

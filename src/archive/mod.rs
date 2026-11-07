@@ -134,7 +134,6 @@ pub fn decode(b: &[u8]) -> io::Result<(TxRecord, Vec<(Address, u64)>)> {
     Ok((TxRecord { slot, time_ms, tx, err, fee, logs, compute_units, return_data, pre, post, node_us }, links))
 }
 
-
 /// Record di un blocco eseguito, con i collegamenti per indirizzo ancora da riempire.
 pub fn records_of(ex: &Executed, node_us: impl Fn(&Signature) -> Option<u64>) -> Vec<TxRecord> {
     let h = &ex.block.header;

@@ -29,8 +29,17 @@ pub const QUEUE_BLOCKS: usize = 600;
 
 pub enum Msg {
     /// Delta del blocco e stati delle sue tx (firma, errore).
-    Block { height: u64, state_hash: Hash, delta: Arc<Accounts>, statuses: Vec<(Signature, Option<TransactionError>)> },
-    Snapshot { height: u64, genesis_hash: Hash, state_hash: Hash },
+    Block {
+        height: u64,
+        state_hash: Hash,
+        delta: Arc<Accounts>,
+        statuses: Vec<(Signature, Option<TransactionError>)>,
+    },
+    Snapshot {
+        height: u64,
+        genesis_hash: Hash,
+        state_hash: Hash,
+    },
     /// Attende la fine della scrittura in corso e risponde.
     Barrier(SyncSender<()>),
     /// Solo test: rallenta il thread / simula una divergenza.
@@ -95,10 +104,8 @@ impl Shadow {
             .name("centrifuga-shadow".into())
             .spawn(move || {
                 let mut index = TxIndex::new(window, 0, 0);
-                let rep = index
-                    .decode(&status, height)
-                    .map_err(|e| format!("status: {e}"))
-                    .and_then(|()| Replica::from_state(height, state_hash, accounts, rules));
+                let rep =
+                    index.decode(&status, height).map_err(|e| format!("status: {e}")).and_then(|()| Replica::from_state(height, state_hash, accounts, rules));
                 run(dir, rep, index, rx, st, mb_s)
             })
             .map_err(|e| format!("shadow thread: {e}"))?;
@@ -165,7 +172,11 @@ impl Drop for Shadow {
 fn lower_priority() {
     let tid = std::fs::read_link("/proc/thread-self").ok().and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
     if let Some(tid) = tid {
-        let ok = std::process::Command::new("renice").args(["-n", "10", "-p", &tid]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        let ok = std::process::Command::new("renice")
+            .args(["-n", "10", "-p", &tid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         if !ok.is_ok_and(|s| s.success()) {
             eprintln!("shadow: could not lower the thread priority (renice)");
         }
@@ -189,11 +200,11 @@ impl State {
         match m {
             Msg::Block { height, state_hash, delta, statuses } => {
                 self.index.record_statuses(height, statuses);
-                if let Some(r) = self.rep.as_mut() {
-                    if let Err(e) = r.apply_delta(height, state_hash, &delta) {
-                        self.st.fail(format!("shadow state diverged at {height}: {e}"));
-                        self.rep = None;
-                    }
+                if let Some(r) = self.rep.as_mut()
+                    && let Err(e) = r.apply_delta(height, state_hash, &delta)
+                {
+                    self.st.fail(format!("shadow state diverged at {height}: {e}"));
+                    self.rep = None;
                 }
             }
             Msg::Snapshot { height, genesis_hash, state_hash } => self.snapshot(height, genesis_hash, state_hash, rx),
@@ -229,7 +240,8 @@ impl State {
         let tmp = self.dir.join("snapshot.tmp");
         let result = (|| -> Result<bool, String> {
             let e = |e: std::io::Error| format!("snapshot {height}: {e}");
-            let mut w = crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?.with_rate(self.mb_s);
+            let mut w =
+                crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?.with_rate(self.mb_s);
             let mut lt = crate::exec::state_hash::LtState::empty();
             for (i, (k, a)) in r.accounts().iter().enumerate() {
                 w.push(k, a).map_err(e)?;

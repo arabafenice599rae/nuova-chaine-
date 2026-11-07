@@ -162,6 +162,7 @@ fn from_height(uri: &str) -> u64 {
     uri.split(['?', '&']).find_map(|p| p.strip_prefix("from_height=")).and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
+#[allow(clippy::result_large_err)] // callback di tungstenite
 async fn conn(s: Stream, c: tokio::net::TcpStream) {
     let mut from = 0;
     let cb = |req: &tokio_tungstenite::tungstenite::handshake::server::Request, resp| {
@@ -399,10 +400,10 @@ impl Replica {
         let kind = field(&v, "type")?.as_str();
         if kind == Some("chain") {
             let got = (field(&v, "chainId")?.as_str().unwrap_or("").to_string(), parse::<Hash>(&v, "genesisHash")?);
-            if let Some(exp) = &self.expected_chain {
-                if &got != exp {
-                    return Err(format!("node of another chain: {} {} (expected {} {})", got.0, got.1, exp.0, exp.1));
-                }
+            if let Some(exp) = &self.expected_chain
+                && &got != exp
+            {
+                return Err(format!("node of another chain: {} {} (expected {} {})", got.0, got.1, exp.0, exp.1));
             }
             self.chain_checked = true;
             return Ok(());
@@ -437,10 +438,10 @@ impl Replica {
                     return Err(format!("block {}: invalid signature", block.header.height));
                 }
                 let h = &block.header;
-                if let Some(max) = self.max_future_ms {
-                    if h.timestamp_ms > crate::node::now_ms() + max {
-                        return Err(format!("block {}: timestamp in the future", h.height));
-                    }
+                if let Some(max) = self.max_future_ms
+                    && h.timestamp_ms > crate::node::now_ms() + max
+                {
+                    return Err(format!("block {}: timestamp in the future", h.height));
                 }
                 // Blocco concatenato (stesso prev_hash): valgono le regole di altezza e
                 // timestamp. Un blocco solo header con prev_hash diverso è una nuova ancora

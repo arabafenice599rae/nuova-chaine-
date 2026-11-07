@@ -46,19 +46,12 @@ impl Svm {
         // Clock a slot 0 prima di caricare i programmi: litesvm li registra allo
         // slot corrente e lo slot di ogni blocco sarà l'altezza (>= 1).
         svm.set_sysvar(&Clock::default());
-        let svm = svm
-            .with_feature_accounts()
-            .with_default_programs()
-            .with_precompiles();
+        let svm = svm.with_feature_accounts().with_default_programs().with_precompiles();
         Svm(svm)
     }
 
     /// Ricostruisce lo stato da uno snapshot.
-    pub fn restore(
-        accounts: Vec<(Address, AccountSharedData)>,
-        lamports_per_signature: u64,
-        latest_blockhash: Hash,
-    ) -> Result<Svm, String> {
+    pub fn restore(accounts: Vec<(Address, AccountSharedData)>, lamports_per_signature: u64, latest_blockhash: Hash) -> Result<Svm, String> {
         let mut svm = base(lamports_per_signature);
         for (k, a) in accounts {
             svm.set_account_no_checks(k, a);
@@ -112,10 +105,8 @@ impl Svm {
         Executed { result, fee_charged }
     }
 
-    pub fn simulate(
-        &self,
-        tx: VersionedTransaction,
-    ) -> Result<SimulatedTransactionInfo, FailedTransactionMetadata> {
+    #[allow(clippy::result_large_err)] // tipo di litesvm
+    pub fn simulate(&self, tx: VersionedTransaction) -> Result<SimulatedTransactionInfo, FailedTransactionMetadata> {
         self.0.simulate_transaction(tx)
     }
 
@@ -123,11 +114,15 @@ impl Svm {
     /// Sovrainsieme degli account che la tx può aver modificato.
     pub fn writable_keys(&self, tx: &VersionedTransaction) -> Vec<Address> {
         let m = &tx.message;
-        let fallback = || m.static_account_keys().iter().enumerate()
-            .filter(|(i, _)| m.is_maybe_writable_with_reserved_addresses(*i, None::<&std::collections::HashSet<Address>>)).map(|(_, k)| *k).collect();
-        let Ok(s) = SanitizedTransaction::try_create(
-            tx.clone(), MessageHash::Compute, Some(false), self.0.accounts_db(), &Default::default(),
-        ) else {
+        let fallback = || {
+            m.static_account_keys()
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| m.is_maybe_writable_with_reserved_addresses(*i, None::<&std::collections::HashSet<Address>>))
+                .map(|(_, k)| *k)
+                .collect()
+        };
+        let Ok(s) = SanitizedTransaction::try_create(tx.clone(), MessageHash::Compute, Some(false), self.0.accounts_db(), &Default::default()) else {
             return fallback();
         };
         let m = s.message();

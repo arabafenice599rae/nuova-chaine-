@@ -29,10 +29,10 @@ use centrifuga::genesis::{self, Config, LAMPORTS_PER_CNFA, Prefund, transfer_tx}
 use centrifuga::node::Node;
 use merkle::Merkle;
 use solana_account::{Account, AccountSharedData};
-use solana_instruction::{AccountMeta, Instruction};
-use solana_message::{Message, VersionedMessage};
 use solana_address::Address;
+use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
+use solana_message::{Message, VersionedMessage};
 use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
@@ -91,7 +91,12 @@ fn spl_tx(from: &Keypair, to: &Address, mint: &Address, amount: u64, bh: solana_
     data.push(6);
     let transfer = Instruction {
         program_id: token,
-        accounts: vec![AccountMeta::new(src, false), AccountMeta::new_readonly(*mint, false), AccountMeta::new(dst, false), AccountMeta::new_readonly(from.pubkey(), true)],
+        accounts: vec![
+            AccountMeta::new(src, false),
+            AccountMeta::new_readonly(*mint, false),
+            AccountMeta::new(dst, false),
+            AccountMeta::new_readonly(from.pubkey(), true),
+        ],
         data,
     };
     let msg = Message::new_with_blockhash(&[create, transfer], Some(&from.pubkey()), &bh);
@@ -217,7 +222,12 @@ fn main() {
     let spl = raw.iter().any(|a| a == "--spl");
     let steps_arg = raw.iter().position(|a| a == "--steps").map(|i| raw[i + 1].split(',').map(|x| x.parse::<usize>().unwrap()).collect::<Vec<_>>());
     let step_list = steps_arg.clone().unwrap_or(STEPS.to_vec());
-    let args: Vec<u64> = raw.iter().enumerate().filter(|(i, a)| !a.starts_with("--") && !(*i > 0 && raw[i - 1] == "--steps")).map(|(_, a)| a.replace('_', "").parse().expect("number")).collect();
+    let args: Vec<u64> = raw
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| !a.starts_with("--") && !(*i > 0 && raw[i - 1] == "--steps"))
+        .map(|(_, a)| a.replace('_', "").parse().expect("number"))
+        .collect();
     let (n, blocks) = (args[0], *args.get(1).unwrap_or(&100) as usize);
     let mint = addr(u64::MAX);
     let op = Keypair::new();
@@ -379,10 +389,10 @@ fn main() {
         }
     }
 
-    for v in 0..5 {
-        let ok = steps.iter().filter(|s| pct(&s.v[v].iter().map(|x| x.total).collect::<Vec<_>>(), 0.99) < LIMIT_MS).last();
+    for (v, name) in NAMES.iter().enumerate().take(5) {
+        let ok = steps.iter().rfind(|s| pct(&s.v[v].iter().map(|x| x.total).collect::<Vec<_>>(), 0.99) < LIMIT_MS);
         let Some(s) = ok else {
-            println!("| {n} | {} | < {} tx/blocco |", NAMES[v], step_list[0]);
+            println!("| {n} | {} | < {} tx/blocco |", name, step_list[0]);
             continue;
         };
         let bl = &s.v[v];
@@ -395,7 +405,7 @@ fn main() {
         };
         println!(
             "| {n} | {} | {} | {} | {:.1} / {:.1} / {:.1} | {:.1} / {:.1} / {:.2} / {:.1} / {:.1} | {ram} | {snap_mb:.0} | {:.1} | {proof} |",
-            NAMES[v],
+            name,
             s.load,
             s.load * 10,
             pct(&tot, 0.5),
@@ -410,7 +420,12 @@ fn main() {
         );
         if v == 2 || v == 4 {
             let r = &s.root_ms[(v - 2) / 2];
-            println!("{}: radice ogni secondo in {:.1} ms medi, max {:.1} ms (thread separato)", NAMES[v], r.iter().sum::<f64>() / r.len() as f64, r.iter().cloned().fold(0.0, f64::max));
+            println!(
+                "{}: radice ogni secondo in {:.1} ms medi, max {:.1} ms (thread separato)",
+                name,
+                r.iter().sum::<f64>() / r.len() as f64,
+                r.iter().cloned().fold(0.0, f64::max)
+            );
         }
     }
     println!("RAM di picco del processo: {peak_ram} MB");

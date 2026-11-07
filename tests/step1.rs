@@ -153,8 +153,7 @@ fn spl_token_programs_are_live() {
     for token in ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"] {
         let token = genesis::parse_address(token).unwrap();
         let mint = Keypair::new();
-        let create = solana_system_interface::instruction::create_account(
-            &payer.pubkey(), &mint.pubkey(), c.svm.rent_exempt(82), 82, &token);
+        let create = solana_system_interface::instruction::create_account(&payer.pubkey(), &mint.pubkey(), c.svm.rent_exempt(82), 82, &token);
         let mut data = vec![20, 9];
         data.extend_from_slice(payer.pubkey().as_ref());
         data.push(0);

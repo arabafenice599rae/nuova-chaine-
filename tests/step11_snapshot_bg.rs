@@ -205,10 +205,7 @@ fn shadow_follows_closed_and_recreated_accounts() {
 /// dell'LtHash della copia, prima di scrivere).
 #[test]
 fn diverged_shadow_does_not_write_and_reports() {
-    for (case, k, expected) in [
-        ("touched", user().pubkey(), "diverged"),
-        ("untouched", centrifuga::genesis::vault_address("airdrop"), "not written"),
-    ] {
+    for (case, k, expected) in [("touched", user().pubkey(), "diverged"), ("untouched", centrifuga::genesis::vault_address("airdrop"), "not written")] {
         let d = dir(&format!("shadow_diverge_{case}"));
         let cfg = config(&d, 5);
         let t0 = cfg.genesis.timestamp_ms;

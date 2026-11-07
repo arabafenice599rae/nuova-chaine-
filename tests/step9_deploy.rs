@@ -60,7 +60,8 @@ impl T {
         let lamports = self.n.chain.svm.rent_exempt(UpgradeableLoaderState::size_of_buffer(elf.len()));
         let create = loader::create_buffer(&payer.pubkey(), &buf.pubkey(), &payer.pubkey(), lamports, elf.len()).unwrap();
         self.block(vec![(create, vec![&buf])], payer);
-        let writes = elf.chunks(CHUNK).enumerate().map(|(i, c)| (vec![loader::write(&buf.pubkey(), &payer.pubkey(), (i * CHUNK) as u32, c.to_vec())], vec![])).collect();
+        let writes =
+            elf.chunks(CHUNK).enumerate().map(|(i, c)| (vec![loader::write(&buf.pubkey(), &payer.pubkey(), (i * CHUNK) as u32, c.to_vec())], vec![])).collect();
         self.block(writes, payer);
         buf
     }

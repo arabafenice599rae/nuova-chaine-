@@ -13,9 +13,9 @@ use crate::exec::litesvm_internal::Svm;
 use crate::exec::{Chain, Executed};
 use crate::genesis::{self, Config};
 use crate::ingress::{Ingress, Limits};
-use solana_address::Address;
 use crate::ledger::{self, Journal};
 use crate::rpc::index::TxIndex;
+use solana_address::Address;
 
 /// Richiesta da eseguire sul thread del nodo (RPC, WebSocket).
 pub type Query = Box<dyn FnOnce(&mut Node) + Send>;
@@ -70,7 +70,7 @@ impl Node {
         let (mut chain, snap_height) = chain_from_snapshot(&cfg, &dir)?;
         // Finestre in RAM dimensionate subito (nessun ridimensionamento): firme della
         // finestra anti-duplicati e stati delle tx degli stessi blocchi.
-        let window = chain.params.blockhash_window as usize * cfg.node.max_block_txs;
+        let window = chain.params.blockhash_window * cfg.node.max_block_txs;
         chain.reserve_signatures(window);
         let mut index = TxIndex::new(chain.params.blockhash_window as u64, cfg.node.rpc_recent_txs, window);
         index.load(&dir, snap_height).map_err(|e| format!("status.bin: {e}"))?;
@@ -98,7 +98,28 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
-        let mut n = Node { chain, ingress: Arc::new(Ingress::new(limits)), cfg, index, recent, recent_bytes, arrivals: Default::default(), last_tick_ms: None, last_offset, last_tick_us: 0, sync_log: vec![], snapshot_log: vec![], last_snapshot_us: 0, shadow: None, slow_blocks: vec![], shadow_at: 0, last_delta: None, journal, dir, keypair };
+        let mut n = Node {
+            chain,
+            ingress: Arc::new(Ingress::new(limits)),
+            cfg,
+            index,
+            recent,
+            recent_bytes,
+            arrivals: Default::default(),
+            last_tick_ms: None,
+            last_offset,
+            last_tick_us: 0,
+            sync_log: vec![],
+            snapshot_log: vec![],
+            last_snapshot_us: 0,
+            shadow: None,
+            slow_blocks: vec![],
+            shadow_at: 0,
+            last_delta: None,
+            journal,
+            dir,
+            keypair,
+        };
         if n.cfg.node.snapshot_every > 0 {
             n.start_shadow()?;
         }
@@ -127,7 +148,8 @@ impl Node {
         }
         ex.phases.journal = t.elapsed();
         let arrivals = &mut self.arrivals;
-        let us: HashMap<_, _> = ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
+        let us: HashMap<_, _> =
+            ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
         self.index.record(&ex, |s| us.get(s).copied());
         if self.arrivals.len() > 100_000 {
             self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
@@ -144,7 +166,7 @@ impl Node {
             self.shadow_at = ex.block.header.height;
         }
         let every = self.cfg.node.snapshot_every;
-        if every > 0 && ex.block.header.height % every == 0 {
+        if every > 0 && ex.block.header.height.is_multiple_of(every) {
             let t = Instant::now();
             self.snapshot()?;
             self.last_snapshot_us = t.elapsed().as_micros() as u64;
@@ -371,8 +393,13 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
                 let s = &ex.settlement;
                 println!(
                     "blocco {}: {} tx, fee base {}, operatore {}, riserva {}, premio {}, rimborso priority {}",
-                    ex.block.header.height, ex.block.txs.len(), fmt_amount(s.base, &sym), fmt_amount(s.operator, &sym),
-                    fmt_amount(s.reserve, &sym), fmt_amount(s.reward, &sym), fmt_amount(s.priority_refund, &sym),
+                    ex.block.header.height,
+                    ex.block.txs.len(),
+                    fmt_amount(s.base, &sym),
+                    fmt_amount(s.operator, &sym),
+                    fmt_amount(s.reserve, &sym),
+                    fmt_amount(s.reward, &sym),
+                    fmt_amount(s.priority_refund, &sym),
                 );
             }
         });
@@ -391,8 +418,7 @@ impl Running {
     pub async fn serve_network(self) -> Result<(), String> {
         let rpc_addr = self.cfg.node.rpc_addr.parse().map_err(|e| format!("rpc_addr: {e}"))?;
         let stream_addr = self.cfg.node.stream_addr.parse().map_err(|e| format!("stream_addr: {e}"))?;
-        tokio::try_join!(crate::rpc::serve(self.gateway, rpc_addr), crate::stream::serve(self.stream, stream_addr))
-            .map_err(|e| e.to_string())?;
+        tokio::try_join!(crate::rpc::serve(self.gateway, rpc_addr), crate::stream::serve(self.stream, stream_addr)).map_err(|e| e.to_string())?;
         Ok(())
     }
 }
@@ -404,7 +430,14 @@ pub fn recent_entry_bytes(changed: usize) -> usize {
 
 /// Aggiunge un blocco alla finestra del recupero e toglie i più vecchi finché valgono
 /// entrambi i limiti (blocchi e byte): vale il primo raggiunto.
-fn remember(recent: &mut VecDeque<(u64, u64, Vec<Address>)>, bytes: &mut usize, (max_blocks, max_bytes): (usize, usize), height: u64, offset: u64, ex: &Executed) {
+fn remember(
+    recent: &mut VecDeque<(u64, u64, Vec<Address>)>,
+    bytes: &mut usize,
+    (max_blocks, max_bytes): (usize, usize),
+    height: u64,
+    offset: u64,
+    ex: &Executed,
+) {
     let changed: Vec<Address> = ex.changed.iter().copied().collect();
     *bytes += recent_entry_bytes(changed.len());
     recent.push_back((height, offset, changed));

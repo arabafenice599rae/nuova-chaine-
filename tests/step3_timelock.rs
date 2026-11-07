@@ -77,26 +77,38 @@ impl T {
         let w = Keypair::new();
         let len = centrifuga_timelock::WAVE_HEADER + bits.div_ceil(8);
         let create = solana_system_interface::instruction::create_account(
-            &self.op.pubkey(), &w.pubkey(), self.c.svm.rent_exempt(len), len as u64, &timelock_program_id());
+            &self.op.pubkey(),
+            &w.pubkey(),
+            self.c.svm.rent_exempt(len),
+            len as u64,
+            &timelock_program_id(),
+        );
         let mut data = vec![1];
         data.extend_from_slice(&amount.to_le_bytes());
-        let init = ix(data, vec![AccountMeta::new(w.pubkey(), false), AccountMeta::new_readonly(vault_address(vault), false), AccountMeta::new_readonly(auth.pubkey(), true)]);
+        let init = ix(
+            data,
+            vec![AccountMeta::new(w.pubkey(), false), AccountMeta::new_readonly(vault_address(vault), false), AccountMeta::new_readonly(auth.pubkey(), true)],
+        );
         let op = Keypair::try_from(self.op.to_bytes().as_slice()).unwrap();
         let extra: Vec<&Keypair> = if auth.pubkey() == op.pubkey() { vec![&w] } else { vec![&w, auth] };
         self.run(&[create, init], &op, &extra).map(|_| w.pubkey())
     }
+    #[allow(clippy::too_many_arguments)]
     /// Claim con firma di `signer` sul messaggio (ondata, `signed_for`, importo, indice).
     fn claim(&mut self, vault: &str, wave: Address, to: Address, amount: u64, index: u32, signer: &Keypair, signed_for: Address) -> Result<(), String> {
         let msg = claim_message(&wave.to_bytes(), &signed_for.to_bytes(), amount, index);
         let sig = ed25519_ix(signer, &msg);
         let mut data = vec![2];
         data.extend_from_slice(&index.to_le_bytes());
-        let claim = ix(data, vec![
-            AccountMeta::new(vault_address(vault), false),
-            AccountMeta::new(wave, false),
-            AccountMeta::new(to, false),
-            AccountMeta::new_readonly(solana_sdk_ids::sysvar::instructions::id(), false),
-        ]);
+        let claim = ix(
+            data,
+            vec![
+                AccountMeta::new(vault_address(vault), false),
+                AccountMeta::new(wave, false),
+                AccountMeta::new(to, false),
+                AccountMeta::new_readonly(solana_sdk_ids::sysvar::instructions::id(), false),
+            ],
+        );
         let user = Keypair::try_from(self.user.to_bytes().as_slice()).unwrap();
         self.run(&[sig, claim], &user, &[])
     }
@@ -104,6 +116,7 @@ impl T {
         let user = Keypair::try_from(self.user.to_bytes().as_slice()).unwrap();
         self.run(&[ix(vec![0], vec![AccountMeta::new(vault_address(vault), false), AccountMeta::new(to, false)])], &user, &[])
     }
+    #[allow(clippy::wrong_self_convention)]
     fn to_reserve(&mut self, payer: &Keypair) -> Result<(), String> {
         let accs = vec![AccountMeta::new(vault_address("airdrop"), false), AccountMeta::new(vault_address("reserve"), false)];
         self.run(&[ix(vec![3], accs)], payer, &[])

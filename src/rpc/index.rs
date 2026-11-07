@@ -3,6 +3,7 @@
 //!     getSignatureStatuses e coprono la scadenza dei blockhash; si salvano accanto
 //!     allo snapshot (status.bin, limitato alla finestra), così un riavvio non li perde;
 //!   - record completi delle ultime `rpc_recent_txs` tx, per getTransaction.
+//!
 //! Lo storico completo non sta nel nodo: lo serve l'indexer (`centrifuga indexer`).
 
 use std::collections::{HashMap, VecDeque};

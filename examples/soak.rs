@@ -5,11 +5,14 @@
 //!   - senza --rpc: direttamente all'ingresso del nodo (3 thread). Misura il LIMITE DEL
 //!     NODO, non il throughput di un utente: niente HTTP, JSON, base64.
 //!   - con --rpc: via HTTP/JSON-RPC `sendTransaction` (16 thread, una richiesta per tx),
-//!     come un client vero: è il numero end-to-end (client sulla stessa macchina). Ogni minuto: tx inviate, accettate, incluse, TPS effettivi,
+//!     come un client vero: è il numero end-to-end (client sulla stessa macchina).
+//!
+//! Ogni minuto: tx inviate, accettate, incluse, TPS effettivi,
 //! blocco p50/p95/p99 (misurato dentro il nodo), RAM, journal, e due controlli:
 //!   - getSignatureStatuses (RPC) trova una tx di ~290 blocchi fa e non una di >300;
 //!   - ogni 5 minuti `centrifuga wallet send` sotto carico: fee, premio, rimborso e costo
 //!     netto coerenti con il saldo letto via RPC.
+//!
 //! Alla fine scrive soak.meta; `--reopen` misura il riavvio da snapshot + journal e la
 //! riesecuzione completa dallo stato iniziale, e confronta gli hash con il nodo vivo.
 //! Ogni riga dei risultati va anche nel file $RESULTS (aggiunta in coda con fsync): un
@@ -80,7 +83,15 @@ fn cpu_ticks() -> [u64; 4] {
         let f: Vec<&str> = s[b + 2..].split(' ').collect();
         let ticks = f.get(11).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0) + f.get(12).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
         let name = &s[a + 1..b];
-        let i = if name == "centrifuga-node" { 0 } else if name.starts_with("tokio-") { 1 } else if name.starts_with("soak-client") { 2 } else { 3 };
+        let i = if name == "centrifuga-node" {
+            0
+        } else if name.starts_with("tokio-") {
+            1
+        } else if name.starts_with("soak-client") {
+            2
+        } else {
+            3
+        };
         g[i] += ticks;
     }
     g
@@ -140,7 +151,12 @@ fn main() {
     let dir = std::env::var("LOAD_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir().join("centrifuga-soak"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let cpu = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default().lines().find(|l| l.starts_with("model name")).map(|l| l.split(": ").nth(1).unwrap_or("").to_string()).unwrap_or_default();
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_default()
+        .lines()
+        .find(|l| l.starts_with("model name"))
+        .map(|l| l.split(": ").nth(1).unwrap_or("").to_string())
+        .unwrap_or_default();
     say!(
         "macchina: {} vCPU, {cpu}; commit {}; avvio {} ms (unix)",
         std::thread::available_parallelism().map_or(0, |n| n.get()),
@@ -180,45 +196,50 @@ fn main() {
             (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone(), pending.clone());
         let rate = tps as f64 / signers_n as f64;
         let senders: Vec<Keypair> = (0..SENDERS).filter(|i| i % signers_n == w).map(key).collect();
-        signers.push(std::thread::Builder::new().name(format!("soak-client-{w}")).spawn(move || {
-            let (start, mut done, mut k) = (Instant::now(), 0u64, w);
-            while !stop.load(Ordering::Relaxed) {
-                // Ritmo: tx dovute finora, a lotti da 50.
-                let due = (start.elapsed().as_secs_f64() * rate) as u64;
-                if done >= due {
-                    std::thread::sleep(Duration::from_millis(2));
-                    continue;
-                }
-                let h = *bh.lock().unwrap();
-                let batch: Vec<_> = (0..50)
-                    .map(|_| {
-                        k += signers_n;
-                        let from = &senders[((k / signers_n) % senders.len() as u64) as usize];
-                        transfer_tx(from, &addr(k.wrapping_mul(0x9E37_79B9_7F4A_7C15) % n.max(1)), 1 + k % 100_000, h)
-                    })
-                    .collect();
-                if k % 1_000 < 50 {
-                    samples.lock().unwrap().push((batch[0].signatures[0], height.load(Ordering::Relaxed)));
-                    pending.lock().unwrap().push((batch[0].signatures[0], Instant::now())); // batch[0] parte per prima
-                }
-                let ok = if via_rpc {
-                    use base64::Engine;
-                    let url = format!("http://{RPC}");
-                    batch
-                        .iter()
-                        .filter(|t| {
-                            let raw = base64::engine::general_purpose::STANDARD.encode(wincode::serialize(*t).unwrap());
-                            call(&url, "sendTransaction", json!([raw, {"encoding": "base64", "skipPreflight": true}])).is_ok()
-                        })
-                        .count() as u64
-                } else {
-                    ingress.submit(None, batch).iter().filter(|r| r.is_ok()).count() as u64
-                };
-                sent.fetch_add(50, Ordering::Relaxed);
-                accepted.fetch_add(ok, Ordering::Relaxed);
-                done += 50;
-            }
-        }).unwrap());
+        signers.push(
+            std::thread::Builder::new()
+                .name(format!("soak-client-{w}"))
+                .spawn(move || {
+                    let (start, mut done, mut k) = (Instant::now(), 0u64, w);
+                    while !stop.load(Ordering::Relaxed) {
+                        // Ritmo: tx dovute finora, a lotti da 50.
+                        let due = (start.elapsed().as_secs_f64() * rate) as u64;
+                        if done >= due {
+                            std::thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        let h = *bh.lock().unwrap();
+                        let batch: Vec<_> = (0..50)
+                            .map(|_| {
+                                k += signers_n;
+                                let from = &senders[((k / signers_n) % senders.len() as u64) as usize];
+                                transfer_tx(from, &addr(k.wrapping_mul(0x9E37_79B9_7F4A_7C15) % n.max(1)), 1 + k % 100_000, h)
+                            })
+                            .collect();
+                        if k % 1_000 < 50 {
+                            samples.lock().unwrap().push((batch[0].signatures[0], height.load(Ordering::Relaxed)));
+                            pending.lock().unwrap().push((batch[0].signatures[0], Instant::now())); // batch[0] parte per prima
+                        }
+                        let ok = if via_rpc {
+                            use base64::Engine;
+                            let url = format!("http://{RPC}");
+                            batch
+                                .iter()
+                                .filter(|t| {
+                                    let raw = base64::engine::general_purpose::STANDARD.encode(wincode::serialize(*t).unwrap());
+                                    call(&url, "sendTransaction", json!([raw, {"encoding": "base64", "skipPreflight": true}])).is_ok()
+                                })
+                                .count() as u64
+                        } else {
+                            ingress.submit(None, batch).iter().filter(|r| r.is_ok()).count() as u64
+                        };
+                        sent.fetch_add(50, Ordering::Relaxed);
+                        accepted.fetch_add(ok, Ordering::Relaxed);
+                        done += 50;
+                    }
+                })
+                .unwrap(),
+        );
     }
 
     // Wallet sotto carico.
@@ -226,13 +247,21 @@ fn main() {
     let wkey = dir.join("wallet-key.json");
     let b: Vec<String> = key(SENDERS).to_bytes().iter().map(|x| x.to_string()).collect();
     std::fs::write(&wkey, format!("[{}]", b.join(","))).unwrap();
-    std::fs::write(dir.join("wallet.toml"), format!("rpc = \"http://{RPC}\"\nkeypair = \"{}\"\nchain_id = \"centrifuga:devnet\"\ngenesis_hash = \"{gh}\"\n", wkey.display())).unwrap();
+    std::fs::write(
+        dir.join("wallet.toml"),
+        format!("rpc = \"http://{RPC}\"\nkeypair = \"{}\"\nchain_id = \"centrifuga:devnet\"\ngenesis_hash = \"{gh}\"\n", wkey.display()),
+    )
+    .unwrap();
     let url = format!("http://{RPC}");
     let balance = |k: &Address| call(&url, "getBalance", json!([k.to_string()])).unwrap()["value"].as_u64().unwrap();
     let parse = |s: &str| -> u64 { (s.trim().trim_end_matches(" CnFA").parse::<f64>().unwrap() * 1e9).round() as u64 };
 
-    say!("CPU in % di un core: nodo = thread dei blocchi; rete = runtime tokio (RPC e stream, lato nodo); client = thread che firmano e inviano (in modalità diretta includono la verifica delle firme all'ingresso)");
-    say!("| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | invio→inclusione p50 / p95 / p99 ms | CPU nodo / rete / client / altro % | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |");
+    say!(
+        "CPU in % di un core: nodo = thread dei blocchi; rete = runtime tokio (RPC e stream, lato nodo); client = thread che firmano e inviano (in modalità diretta includono la verifica delle firme all'ingresso)"
+    );
+    say!(
+        "| min | inviate | accettate | incluse | TPS effettivi | blocco p50 / p95 / p99 ms | invio→inclusione p50 / p95 / p99 ms | CPU nodo / rete / client / altro % | RSS MB | journal MB | stati ok (290 blocchi) / scaduti ok (>300) | wallet |"
+    );
     let (t0, mut ticks, mut all_ticks) = (Instant::now(), vec![], vec![]);
     let mut snap_pauses: Vec<f64> = vec![];
     let every = cfg.node.snapshot_every;
@@ -247,7 +276,10 @@ fn main() {
     while t0.elapsed() < Duration::from_secs(minutes * 60) {
         std::thread::sleep(Duration::from_millis(40));
         // Dirty di /proc/meminfo (kB) a ogni giro, per il picco durante le scritture.
-        if let Some(kb) = std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| m.lines().find(|l| l.starts_with("Dirty:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok())) {
+        if let Some(kb) = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|m| m.lines().find(|l| l.starts_with("Dirty:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok()))
+        {
             dirty_samples.lock().unwrap().push((node::now_ms(), kb));
         }
         let (h, us, inc, lh, snap_us) =
@@ -290,7 +322,8 @@ fn main() {
             continue;
         }
         // Finestra degli stati: una tx di 280-295 blocchi fa c'è, una di oltre 310 no.
-        let pick = |lo: u64, hi: u64| samples.lock().unwrap().iter().rev().find(|(_, sh)| h.saturating_sub(*sh) >= lo && h.saturating_sub(*sh) <= hi).map(|x| x.0);
+        let pick =
+            |lo: u64, hi: u64| samples.lock().unwrap().iter().rev().find(|(_, sh)| h.saturating_sub(*sh) >= lo && h.saturating_sub(*sh) <= hi).map(|x| x.0);
         if let Some(s) = pick(282, 292) {
             let v = call(&url, "getSignatureStatuses", json!([[s.to_string()]])).unwrap();
             if v["value"][0]["slot"].is_u64() { st_ok += 1 } else { st_bad += 1 }
@@ -316,7 +349,11 @@ fn main() {
             let line = text.lines().find(|l| l.starts_with("fee ")).unwrap_or("").to_string();
             let parts: Vec<&str> = line.split(", ").map(|p| p.rsplitn(3, ' ').collect::<Vec<_>>()).map(|v| if v.len() >= 2 { v[1] } else { "" }).collect();
             let good = o.status.success() && parts.len() == 4 && before - after == 1_000_000 + parse(parts[3]) && parse(parts[0]) == 5_000;
-            if good { wallet_ok += 1 } else { wallet_bad += 1 }
+            if good {
+                wallet_ok += 1
+            } else {
+                wallet_bad += 1
+            }
             wallet_line = if good { format!("ok ({line})") } else { format!("ERRORE: {text}") };
         }
         let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
@@ -361,14 +398,22 @@ fn main() {
     }
     std::thread::sleep(Duration::from_millis(300));
     let (h, lh, sh, inc, stl, skipped) = rt
-        .block_on(gw.query(|n: &mut Node| (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), (n.snapshot_counts().0, n.snapshot_write_stats()))))
+        .block_on(gw.query(|n: &mut Node| {
+            (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), (n.snapshot_counts().0, n.snapshot_write_stats()))
+        }))
         .unwrap();
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
     let hours = t0.elapsed().as_secs_f64() / 3600.0;
     let j = mb(&dir.join("journal.bin"));
     say!("totale: inviate {s}, accettate {ac}, rifiutate all'ingresso {}, incluse {inc}, non incluse {}", s - ac, ac.saturating_sub(inc));
     say!("TPS effettivi medi {:.0} (richiesti {tps}); altezza {h}", inc as f64 / (hours * 3600.0));
-    say!("blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms", pct(&mut all_ticks, 0.5), pct(&mut all_ticks, 0.95), pct(&mut all_ticks, 0.99), pct(&mut all_ticks, 1.0));
+    say!(
+        "blocco (tutta la prova): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms",
+        pct(&mut all_ticks, 0.5),
+        pct(&mut all_ticks, 0.95),
+        pct(&mut all_ticks, 0.99),
+        pct(&mut all_ticks, 1.0)
+    );
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
     // sync_data del journal: nella finestra reale di ogni snapshot (dall'inizio al rename),
     // nella finestra fissa di 600 blocchi dall'altezza dello snapshot, e nel resto.
@@ -397,9 +442,15 @@ fn main() {
     say!("");
     say!(
         "sync_data del journal: finestra reale degli snapshot ({} blocchi) p99 {:.1} / max {:.1} ms; finestra fissa di 600 blocchi ({} blocchi) p99 {:.1} / max {:.1} ms; resto ({} blocchi) p99 {:.1} / max {:.1} ms; picco Dirty in tutta la prova {} MB",
-        real.len(), pct(&mut real, 0.99), pct(&mut real, 1.0),
-        fixed_all.len(), pct(&mut fixed_all, 0.99), pct(&mut fixed_all, 1.0),
-        rest.len(), pct(&mut rest, 0.99), pct(&mut rest, 1.0),
+        real.len(),
+        pct(&mut real, 0.99),
+        pct(&mut real, 1.0),
+        fixed_all.len(),
+        pct(&mut fixed_all, 0.99),
+        pct(&mut fixed_all, 1.0),
+        rest.len(),
+        pct(&mut rest, 0.99),
+        pct(&mut rest, 1.0),
         dirty.iter().map(|x| x.1).max().unwrap_or(0) / 1024
     );
     say!(
@@ -424,7 +475,13 @@ fn main() {
         "RSS intorno agli snapshot (altezza: prima -> 1 min dopo): {}",
         snap_lines.iter().map(|(h, b, a)| format!("{h}: {b} -> {a}")).collect::<Vec<_>>().join(", ")
     );
-    say!("journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB", j * 1e6 / inc.max(1) as f64, j / hours, mb(&dir.join("snapshot.bin")), mb(&dir.join("status.bin")));
+    say!(
+        "journal {j:.0} MB = {:.0} byte/tx, {:.0} MB/ora; snapshot {:.0} MB; status.bin {:.1} MB",
+        j * 1e6 / inc.max(1) as f64,
+        j / hours,
+        mb(&dir.join("snapshot.bin")),
+        mb(&dir.join("status.bin"))
+    );
     say!("stati: {st_ok} trovati e {exp_ok} scaduti come atteso (errori {st_bad} / {exp_bad}); wallet sotto carico: {wallet_ok} ok, {wallet_bad} errori");
     say!(
         "snapshot durante il carico: {} (pausa sul thread del nodo: codifica degli stati e invio allo stato ombra; copia e scrittura sono in background: {}), massimo {:.0} ms",
@@ -439,11 +496,21 @@ fn main() {
         "blocchi oltre 100 ms: {} {}",
         slow.len(),
         slow.iter()
-            .map(|(h, us, p)| format!("[{h}: {:.0} ms = esecuzione {:.0} + hash {:.0} + firma {:.0} + journal {:.0} + altro {:.0}]", *us as f64 / 1e3, ms(p.exec), ms(p.hash), ms(p.sign), ms(p.journal), ms(p.other)))
+            .map(|(h, us, p)| format!(
+                "[{h}: {:.0} ms = esecuzione {:.0} + hash {:.0} + firma {:.0} + journal {:.0} + altro {:.0}]",
+                *us as f64 / 1e3,
+                ms(p.exec),
+                ms(p.hash),
+                ms(p.sign),
+                ms(p.journal),
+                ms(p.other)
+            ))
             .collect::<Vec<_>>()
             .join(" ")
     );
-    say!("snapshot saltati (scrittura in corso, coda piena o ombra persa): {skipped}; ultima scrittura {write_ms} ms; coda massima durante una scrittura {max_queue} blocchi");
+    say!(
+        "snapshot saltati (scrittura in corso, coda piena o ombra persa): {skipped}; ultima scrittura {write_ms} ms; coda massima durante una scrittura {max_queue} blocchi"
+    );
     std::fs::write(dir.join("soak.meta"), format!("{n} {ts} {h} {lh} {sh} {load_from}")).unwrap();
     std::process::exit(0); // il nodo gira sul suo thread: si chiude con il processo
 }

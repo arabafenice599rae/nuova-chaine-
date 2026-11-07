@@ -21,11 +21,28 @@ use crate::node::Node;
 const SVM_VERSION: &str = "4.3.2";
 /// Metodi supportati. Tutto il resto risponde -32601 e viene registrato nel log.
 pub const METHODS: &[&str] = &[
-    "getBalance", "getAccountInfo", "getMultipleAccounts", "getTokenAccountsByOwner", "getLatestBlockhash",
-    "getBlockHeight", "getSlot", "getFeeForMessage", "simulateTransaction", "sendTransaction",
-    "getSignatureStatuses", "getTransaction", "getVersion", "getHealth", "getMinimumBalanceForRentExemption",
-    "getSignaturesForAddress", "getTokenAccountBalance", "getRecentPrioritizationFees", "isBlockhashValid",
-    "getEpochInfo", "getGenesisHash", "getChainInfo",
+    "getBalance",
+    "getAccountInfo",
+    "getMultipleAccounts",
+    "getTokenAccountsByOwner",
+    "getLatestBlockhash",
+    "getBlockHeight",
+    "getSlot",
+    "getFeeForMessage",
+    "simulateTransaction",
+    "sendTransaction",
+    "getSignatureStatuses",
+    "getTransaction",
+    "getVersion",
+    "getHealth",
+    "getMinimumBalanceForRentExemption",
+    "getSignaturesForAddress",
+    "getTokenAccountBalance",
+    "getRecentPrioritizationFees",
+    "isBlockhashValid",
+    "getEpochInfo",
+    "getGenesisHash",
+    "getChainInfo",
 ];
 
 /// Identità della chain (getChainInfo e GET /chain.json): dal genesis, tranne il logo.
@@ -117,8 +134,12 @@ fn record_return_data(r: &TxRecord) -> Value {
 
 fn simulate(n: &Node, tx: VersionedTransaction) -> Value {
     match n.chain.svm.simulate(tx) {
-        Ok(i) => json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": return_data(&i.meta)}),
-        Err(f) => json!({"err": f.err, "logs": f.meta.logs, "accounts": null, "unitsConsumed": f.meta.compute_units_consumed, "returnData": return_data(&f.meta)}),
+        Ok(i) => {
+            json!({"err": null, "logs": i.meta.logs, "accounts": null, "unitsConsumed": i.meta.compute_units_consumed, "returnData": return_data(&i.meta)})
+        }
+        Err(f) => {
+            json!({"err": f.err, "logs": f.meta.logs, "accounts": null, "unitsConsumed": f.meta.compute_units_consumed, "returnData": return_data(&f.meta)})
+        }
     }
 }
 
@@ -134,10 +155,14 @@ pub fn status(slot: u64, err: Option<&solana_transaction::TransactionError>) -> 
 pub const NO_HISTORY: i64 = -32011;
 
 pub fn history_json(list: Vec<crate::archive::HistoryEntry>) -> Value {
-    json!(list.into_iter().map(|r| json!({
-        "signature": r.sig.to_string(), "slot": r.slot, "err": r.err, "memo": null,
-        "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
-    })).collect::<Vec<_>>())
+    json!(
+        list.into_iter()
+            .map(|r| json!({
+                "signature": r.sig.to_string(), "slot": r.slot, "err": r.err, "memo": null,
+                "blockTime": r.time_ms / 1000, "confirmationStatus": "finalized",
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// (limit, before, until) di getSignaturesForAddress.

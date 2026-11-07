@@ -69,7 +69,8 @@ fn eligibility_from_journal() {
         t += 100;
         node.tick(t).unwrap();
     }
-    let residual = node.chain.svm.lamports(&vault_address("airdrop")) - node.chain.svm.rent_exempt(centrifuga::genesis::VAULT_LEN) - 20_000_000 * LAMPORTS_PER_CNFA;
+    let residual =
+        node.chain.svm.lamports(&vault_address("airdrop")) - node.chain.svm.rent_exempt(centrifuga::genesis::VAULT_LEN) - 20_000_000 * LAMPORTS_PER_CNFA;
     drop(node);
 
     let list: BTreeSet<_> = users.iter().filter(|u| u.1).map(|u| u.0.pubkey()).collect();

@@ -60,13 +60,17 @@ fn main() {
     let addrs: Vec<Address> = (0..100_000).map(|_| Address::new_unique()).collect();
     let blocks = total / per;
     // Record pronti in anticipo (la firma costa: non va misurata).
-    let all: Vec<Vec<TxRecord>> = (0..blocks).map(|b| (0..per).map(|j| record(&senders[(j % 2_000) as usize], &addrs[((b * per + j) * 7919 % 100_000) as usize], b * per + j, b + 1)).collect()).collect();
+    let all: Vec<Vec<TxRecord>> = (0..blocks)
+        .map(|b| (0..per).map(|j| record(&senders[(j % 2_000) as usize], &addrs[((b * per + j) * 7919 % 100_000) as usize], b * per + j, b + 1)).collect())
+        .collect();
     let busy = senders[0].pubkey();
     let sample: Vec<Signature> = (0..10_000u64).map(|i| all[(i * 7 % blocks) as usize][(i * 13 % per) as usize].tx.signatures[0]).collect();
     let base = PathBuf::from(std::env::var("LOAD_DIR").unwrap_or_else(|_| "/tmp/archive-bench".into()));
     let kinds = vec!["segments"];
     println!("{total} tx in blocchi da {per}");
-    println!("| archivio | scrittura tx/s | blocco p50 / p99 ms | byte/tx | get p50 / p99 µs | get assente µs | cronologia 10 µs | checkpoint ms | riapertura s | dopo arresto a metà s | conservazione (metà) s |");
+    println!(
+        "| archivio | scrittura tx/s | blocco p50 / p99 ms | byte/tx | get p50 / p99 µs | get assente µs | cronologia 10 µs | checkpoint ms | riapertura s | dopo arresto a metà s | conservazione (metà) s |"
+    );
     for kind in kinds {
         let dir = base.join(kind);
         let _ = std::fs::remove_dir_all(&dir);
@@ -109,7 +113,12 @@ fn main() {
         // Arresto a metà: coda del file più recente troncata (redb lo rifiuta: l'indexer
         // lo ricostruirebbe dal journal; qui si misura la riapertura o il rifiuto).
         // File dei record: txlog.bin (pagine), ultimo seg-*.log (segmenti), history.redb.
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.file_name().unwrap().to_str().unwrap().ends_with(".log") || p.ends_with("txlog.bin") || p.ends_with("history.redb")).collect();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().unwrap().to_str().unwrap().ends_with(".log") || p.ends_with("txlog.bin") || p.ends_with("history.redb"))
+            .collect();
         files.sort();
         let last = files.pop().unwrap();
         let len = std::fs::metadata(&last).unwrap().len();
@@ -175,7 +184,8 @@ fn node_limit(n: u64, storage: &str, blocks: usize) {
     let _ = std::fs::remove_dir_all(&base);
     cfg.node.data_dir = base.join("node");
     std::fs::create_dir_all(&cfg.node.data_dir).unwrap();
-    cfg.indexer = Some(IndexerConfig { data_dir: base.join("indexer"), rpc_addr: "127.0.0.1:0".into(), retention_blocks: 0, segment_txs: 1_000_000, snapshot_every: 0 });
+    cfg.indexer =
+        Some(IndexerConfig { data_dir: base.join("indexer"), rpc_addr: "127.0.0.1:0".into(), retention_blocks: 0, segment_txs: 1_000_000, snapshot_every: 0 });
     let mut chain = centrifuga::genesis::build(&cfg.genesis).unwrap().0;
     let rent = chain.svm.rent_exempt(0);
     for i in 0..n {
@@ -205,7 +215,9 @@ fn node_limit(n: u64, storage: &str, blocks: usize) {
     };
     let bh = fresh(&cfg).chain.last_hash;
     let max = *STEPS.last().unwrap();
-    let all: Vec<Vec<_>> = (0..blocks as u64).map(|b| (0..max as u64).map(|j| transfer_tx(&senders[(j % 2_000) as usize], &addr(rnd() % n), 1 + b * max as u64 + j, bh)).collect()).collect();
+    let all: Vec<Vec<_>> = (0..blocks as u64)
+        .map(|b| (0..max as u64).map(|j| transfer_tx(&senders[(j % 2_000) as usize], &addr(rnd() % n), 1 + b * max as u64 + j, bh)).collect())
+        .collect();
     println!("{n} account, archivio {storage}, {blocks} blocchi per gradino");
     println!("| tx/blocco | senza indexer p50 / p99 ms | con indexer p50 / p99 ms | indexer indietro alla fine (blocchi) | journal B/tx | archivio B/tx |");
     let (mut best, mut best_ix, mut bytes) = (0, 0, (0.0, 0.0));
@@ -269,5 +281,10 @@ fn node_limit(n: u64, storage: &str, blocks: usize) {
     }
     let gb_hour = |load: usize, b: f64| load as f64 * 10.0 * 3600.0 * b / 1e9;
     println!("limite del nodo (p99 < 100 ms): senza indexer {} tx/s, con indexer {} tx/s", best * 10, best_ix * 10);
-    println!("crescita del disco al limite con indexer ({} tx/s): journal {:.1} GB/ora, archivio {:.1} GB/ora", best_ix * 10, gb_hour(best_ix, bytes.0), gb_hour(best_ix, bytes.1));
+    println!(
+        "crescita del disco al limite con indexer ({} tx/s): journal {:.1} GB/ora, archivio {:.1} GB/ora",
+        best_ix * 10,
+        gb_hour(best_ix, bytes.0),
+        gb_hour(best_ix, bytes.1)
+    );
 }

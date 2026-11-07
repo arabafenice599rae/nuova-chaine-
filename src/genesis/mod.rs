@@ -177,18 +177,9 @@ impl GenesisConfig {
             block_budget: self.block_budget_lamports,
             halving_blocks: self.halving_blocks,
             mining_end_height: self.fee_mining_end_height,
-            vaults: Vaults {
-                mining: vault_address("mining"),
-                airdrop: vault_address("airdrop"),
-                reserve: vault_address("reserve"),
-            },
+            vaults: Vaults { mining: vault_address("mining"), airdrop: vault_address("airdrop"), reserve: vault_address("reserve") },
             rules: Rules { slot_ms: self.slot_ms, heartbeat_slots: self.heartbeat_slots },
-            identity: Identity {
-                chain_id: self.chain_id.clone(),
-                name: self.chain_name.clone(),
-                symbol: self.symbol.clone(),
-                decimals: self.decimals,
-            },
+            identity: Identity { chain_id: self.chain_id.clone(), name: self.chain_name.clone(), symbol: self.symbol.clone(), decimals: self.decimals },
         })
     }
 }
