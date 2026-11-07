@@ -193,6 +193,9 @@ pub struct Phases {
     pub hash: std::time::Duration,
     pub sign: std::time::Duration,
     pub journal: std::time::Duration,
+    /// Sul thread del nodo: attesa per coda del journal piena e attesa della CPU.
+    pub queue: std::time::Duration,
+    pub cpu_wait: std::time::Duration,
     pub other: std::time::Duration,
 }
 

@@ -13,9 +13,22 @@ use crate::exec::litesvm_internal::Svm;
 use crate::exec::{Chain, Executed};
 use crate::genesis::{self, Config};
 use crate::ingress::{Ingress, Limits};
-use crate::ledger::{self, Journal};
+use crate::ledger::{self, Durable, Journal, JournalThread};
 use crate::rpc::index::TxIndex;
 use solana_address::Address;
+use solana_hash::Hash;
+
+/// Blocco eseguito in attesa di durabilità, con il delta dello stream calcolato subito
+/// dopo l'esecuzione (lo stato del nodo intanto va avanti).
+pub struct Pending {
+    pub ex: Executed,
+    pub delta: Arc<crate::stream::Accounts>,
+    started: Instant,
+    executed_ms: u64,
+}
+
+/// Chi pubblica un blocco durevole (RPC, stream): impostato da `serve`.
+type Publisher = Box<dyn FnMut(&Node, &Executed, &crate::stream::Accounts) + Send>;
 
 /// Richiesta da eseguire sul thread del nodo (RPC, WebSocket).
 pub type Query = Box<dyn FnOnce(&mut Node) + Send>;
@@ -40,6 +53,11 @@ pub struct Node {
     pub last_tick_us: u64,
     /// (altezza, ms unix, µs di sync_data del journal) di ogni blocco: solo misura.
     pub sync_log: Vec<(u64, u64, u32)>,
+    /// µs dall'accodamento al journal alla durabilità, per blocco: solo misura.
+    pub durable_log: Vec<u32>,
+    /// Per blocco (ms unix): eseguito, durevole (fine del sync_data), pubblicato. Solo
+    /// misura, ultimi 100.000 blocchi.
+    pub block_times: VecDeque<(u64, u64, u64, u64)>,
     /// Snapshot scritti: (altezza, ms unix di inizio e di fine, cioè del rename). Solo misura.
     pub snapshot_log: Vec<(u64, u64, u64)>,
     /// Pausa dell'ultimo snapshot nel suo tick (µs: codifica degli stati e invio allo
@@ -53,7 +71,15 @@ pub struct Node {
     shadow_at: u64,
     /// Delta dell'ultimo blocco (lo stesso per lo stream e per l'ombra).
     pub last_delta: Option<(u64, Arc<crate::stream::Accounts>)>,
-    journal: Journal,
+    journal: JournalThread,
+    /// Eseguiti, non ancora durevoli (al massimo `journal_queue_blocks`).
+    pending: VecDeque<Pending>,
+    /// Ultimo blocco durevole (e pubblicato): altezza e hash.
+    pub durable_height: u64,
+    pub durable_hash: Hash,
+    /// Snapshot dovuto: si chiede all'ombra quando nessun blocco è in attesa (mai oltre il durevole).
+    snapshot_due: bool,
+    publisher: Option<Publisher>,
     dir: PathBuf,
     keypair: Keypair,
 }
@@ -98,6 +124,8 @@ impl Node {
             return Err("journal shorter than the snapshot".into());
         }
         let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
+        let (durable_height, durable_hash) = (chain.height, chain.last_hash);
+        let journal = JournalThread::start(journal, cfg.node.journal_queue_blocks.max(1))?;
         let mut n = Node {
             chain,
             ingress: Arc::new(Ingress::new(limits)),
@@ -110,6 +138,8 @@ impl Node {
             last_offset,
             last_tick_us: 0,
             sync_log: vec![],
+            durable_log: vec![],
+            block_times: VecDeque::new(),
             snapshot_log: vec![],
             last_snapshot_us: 0,
             shadow: None,
@@ -117,6 +147,11 @@ impl Node {
             shadow_at: 0,
             last_delta: None,
             journal,
+            pending: VecDeque::new(),
+            durable_height,
+            durable_hash,
+            snapshot_due: false,
+            publisher: None,
             dir,
             keypair,
         };
@@ -134,80 +169,180 @@ impl Node {
         self.last_tick_ms.map_or(1, |t| ((now_ms.saturating_sub(t) + r.slot_ms / 2) / r.slot_ms).clamp(1, r.heartbeat_slots))
     }
 
-    /// Produce il blocco successivo: preleva in ordine FIFO, esegue, firma, scrive nel journal.
+    /// Produce il blocco successivo e aspetta che sia durevole e pubblicato (come prima
+    /// del thread del journal: lo usano i test e gli strumenti).
     pub fn tick(&mut self, now_ms: u64) -> Result<Executed, String> {
-        let started = Instant::now();
+        self.produce(now_ms)?;
+        let mut done = self.publish(true)?;
+        Ok(done.pop().expect("the block just produced is durable").ex)
+    }
+
+    /// Preleva in ordine FIFO, esegue, firma e accoda al thread del journal; il delta va
+    /// subito allo stato ombra (stato dopo questo blocco). Con `journal_queue_blocks` blocchi già in
+    /// attesa prima aspetta che il più vecchio sia durevole (backpressure).
+    pub fn produce(&mut self, now_ms: u64) -> Result<u64, String> {
+        let (started, delay0) = (Instant::now(), run_delay());
+        while self.pending.len() >= self.queue_blocks() {
+            self.publish_one()?; // backpressure: il disco è indietro di tutta la coda
+        }
+        let waited = started.elapsed();
         let txs = self.ingress.drain(self.cfg.node.max_block_txs);
         let height = self.chain.height + self.gap(now_ms);
         self.last_tick_ms = Some(now_ms);
-        let mut ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
-        let t = Instant::now();
-        let offset = self.journal.append(&ex.block).map_err(|e| format!("journal: {e}"))?;
-        if self.sync_log.len() < 1_000_000 {
-            self.sync_log.push((ex.block.header.height, crate::node::now_ms(), self.journal.last_sync.as_micros() as u32));
+        let ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
+        let delta = Arc::new(crate::stream::block_delta(self, &ex));
+        self.last_delta = Some((height, delta.clone()));
+        if let Some(s) = self.shadow.as_mut() {
+            let statuses = TxIndex::statuses_of(&ex);
+            s.send(crate::shadow::Msg::Block { height, state_hash: ex.block.header.state_hash, delta: delta.clone(), statuses });
+            self.shadow_at = height;
         }
-        ex.phases.journal = t.elapsed();
+        self.journal.send(height, ex.block.encode())?;
+        // Tempo sul thread del nodo per questo blocco (attesa per coda piena compresa).
+        self.last_tick_us = started.elapsed().as_micros() as u64;
+        if self.last_tick_us > 100_000 && self.slow_blocks.len() < 64 {
+            let mut ph = ex.phases;
+            ph.queue = waited;
+            ph.cpu_wait = run_delay().saturating_sub(delay0);
+            ph.other = Duration::from_micros(self.last_tick_us).saturating_sub(ph.queue + ph.cpu_wait + ph.exec + ph.hash + ph.sign);
+            self.slow_blocks.push((height, self.last_tick_us, ph));
+        }
+        self.pending.push_back(Pending { ex, delta, started: Instant::now(), executed_ms: crate::node::now_ms() });
+        Ok(height)
+    }
+
+    /// Pubblica i blocchi diventati durevoli (`wait`: tutti quelli in attesa), in ordine:
+    /// stati delle tx, recupero dello stream, altezza durevole, pubblicazione (RPC,
+    /// stream) e, a coda vuota, lo snapshot dovuto.
+    pub fn publish(&mut self, wait: bool) -> Result<Vec<Pending>, String> {
+        let mut out = vec![];
+        loop {
+            while let Ok(d) = self.journal.done.try_recv() {
+                out.push(self.finish(d?)?);
+            }
+            if !wait || self.pending.is_empty() {
+                break;
+            }
+            out.push(self.publish_one()?);
+        }
+        if self.snapshot_due && self.pending.is_empty() {
+            self.snapshot_due = false;
+            let (t, start) = (Instant::now(), crate::node::now_ms());
+            self.snapshot()?;
+            self.last_snapshot_us = t.elapsed().as_micros() as u64;
+            if self.shadow.is_none() {
+                self.snapshot_log.push((self.chain.height, start, crate::node::now_ms()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Lunghezza massima della coda dei blocchi eseguiti e non ancora durevoli.
+    pub fn queue_blocks(&self) -> usize {
+        self.cfg.node.journal_queue_blocks.max(1)
+    }
+
+    /// Aspetta il prossimo blocco durevole e lo pubblica.
+    fn publish_one(&mut self) -> Result<Pending, String> {
+        let d = self.journal.done.recv().map_err(|_| "journal thread stopped".to_string())??;
+        self.finish(d)
+    }
+
+    fn finish(&mut self, d: Durable) -> Result<Pending, String> {
+        let mut p = self.pending.pop_front().ok_or("durable block without a pending one")?;
+        let ex = &mut p.ex;
+        let h = ex.block.header.height;
+        if d.height != h {
+            return Err(format!("journal: durable {} instead of {h}", d.height));
+        }
+        ex.phases.journal = d.write + d.sync;
+        if self.sync_log.len() < 1_000_000 {
+            self.sync_log.push((h, crate::node::now_ms(), d.sync.as_micros() as u32));
+        }
         let arrivals = &mut self.arrivals;
         let us: HashMap<_, _> =
             ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
-        self.index.record(&ex, |s| us.get(s).copied());
+        self.index.record(ex, |s| us.get(s).copied());
         if self.arrivals.len() > 100_000 {
             self.arrivals.retain(|_, t| t.elapsed() < Duration::from_secs(120)); // tx mai incluse
         }
-        self.last_offset = Some(offset);
+        self.last_offset = Some(d.offset);
         let limits = (self.cfg.node.stream_catchup_blocks, self.cfg.node.stream_catchup_bytes);
-        remember(&mut self.recent, &mut self.recent_bytes, limits, ex.block.header.height, offset, &ex);
-        // Delta del blocco: per lo stream e per lo stato ombra (mai bloccante).
-        let delta = Arc::new(crate::stream::block_delta(self, &ex));
-        self.last_delta = Some((ex.block.header.height, delta.clone()));
-        if let Some(s) = self.shadow.as_mut() {
-            let statuses = TxIndex::statuses_of(&ex);
-            s.send(crate::shadow::Msg::Block { height: ex.block.header.height, state_hash: ex.block.header.state_hash, delta, statuses });
-            self.shadow_at = ex.block.header.height;
-        }
+        remember(&mut self.recent, &mut self.recent_bytes, limits, h, d.offset, ex);
+        (self.durable_height, self.durable_hash) = (h, ex.block.hash());
         let every = self.cfg.node.snapshot_every;
-        if every > 0 && ex.block.header.height.is_multiple_of(every) {
-            let t = Instant::now();
-            self.snapshot()?;
-            self.last_snapshot_us = t.elapsed().as_micros() as u64;
+        self.snapshot_due |= every > 0 && h % every == 0;
+        let ph = &mut ex.phases;
+        ph.other = p.started.elapsed().saturating_sub(ph.exec + ph.hash + ph.sign + ph.journal);
+        // Dall'accodamento al journal alla durabilità (solo misura).
+        if self.durable_log.len() < 1_000_000 {
+            self.durable_log.push(p.started.elapsed().as_micros() as u32);
         }
-        let p = &mut ex.phases;
-        p.other = started.elapsed().saturating_sub(p.exec + p.hash + p.sign + p.journal);
-        self.last_tick_us = started.elapsed().as_micros() as u64;
-        if self.last_tick_us > 100_000 && self.slow_blocks.len() < 64 {
-            self.slow_blocks.push((ex.block.header.height, self.last_tick_us, ex.phases));
+        if let Some(mut f) = self.publisher.take() {
+            f(self, &p.ex, &p.delta);
+            self.publisher = Some(f);
         }
-        Ok(ex)
+        self.block_times.push_back((h, p.executed_ms, d.at_ms, crate::node::now_ms()));
+        if self.block_times.len() > 100_000 {
+            self.block_times.pop_front();
+        }
+        Ok(p)
+    }
+
+    /// Tutto ciò che è eseguito diventa durevole e pubblicato (stream: stato completo
+    /// ancorato all'ultimo blocco, che deve essere durevole).
+    pub fn flush(&mut self) -> Result<(), String> {
+        self.publish(true).map(|_| ())
+    }
+
+    /// Solo test: il thread del journal trattiene le scritture (disco fermo).
+    #[doc(hidden)]
+    pub fn hold_journal_for_test(&self, hold: bool) {
+        self.journal.hold.store(hold, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Solo test: arresto senza scrivere i blocchi in attesa (crash del processo).
+    #[doc(hidden)]
+    pub fn crash_for_test(mut self) {
+        self.journal.discard.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.pending.clear();
+        drop(std::mem::replace(&mut self.journal, JournalThread::dead()));
+        drop(self.shadow.take());
+        std::mem::forget(self);
     }
 
     /// Ciclo principale: a ogni slot un blocco se ci sono tx in coda, oppure se
-    /// da `heartbeat_slots` slot non ne esce uno; tra uno slot e l'altro, le query.
-    pub fn serve(mut self, queries: Receiver<Query>, mut on_block: impl FnMut(&Node, &Executed)) -> Result<(), String> {
+    /// da `heartbeat_slots` slot non ne esce uno; tra uno slot e l'altro, le query e la
+    /// pubblicazione dei blocchi diventati durevoli.
+    pub fn serve(mut self, queries: Receiver<Query>, on_block: impl FnMut(&Node, &Executed, &crate::stream::Accounts) + Send + 'static) -> Result<(), String> {
+        self.publisher = Some(Box::new(on_block));
         let slot = Duration::from_millis(self.cfg.genesis.slot_ms);
         let heartbeat = slot * self.cfg.genesis.heartbeat_slots.max(1) as u32;
         let mut next = Instant::now() + slot;
         // Primo blocco al primo slot: dopo un avvio o un riavvio l'altezza è subito quella reale.
         let mut last_block = Instant::now().checked_sub(heartbeat).unwrap_or_else(Instant::now);
         loop {
+            self.publish(false)?;
             let now = Instant::now();
             if now >= next {
                 next = (next + slot).max(now);
                 if self.ingress.is_empty() && now.duration_since(last_block) + slot / 2 < heartbeat {
                     continue; // slot vuoto: nessun blocco
                 }
-                let ex = self.tick(crate::node::now_ms())?;
+                self.produce(crate::node::now_ms())?;
                 last_block = now;
-                on_block(&self, &ex);
                 // Anche se la produzione non sta nello slot, le query non restano mai ferme.
                 if let Ok(q) = queries.try_recv() {
                     q(&mut self);
                 }
                 continue;
             }
-            match queries.recv_timeout(next - now) {
+            // Con blocchi in attesa si torna presto a controllare la durabilità.
+            let wait = if self.pending.is_empty() { next - now } else { (next - now).min(Duration::from_millis(1)) };
+            match queries.recv_timeout(wait) {
                 Ok(q) => q(&mut self),
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => std::thread::sleep(next - now),
+                Err(RecvTimeoutError::Disconnected) => std::thread::sleep(wait),
             }
         }
     }
@@ -224,8 +359,9 @@ impl Node {
         let accounts = c.svm.accounts().clone();
         let status = self.index.encode(c.height);
         let window = c.params.blockhash_window as u64;
-        let mb_s = self.cfg.node.snapshot_mb_s;
-        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules, status, window, mb_s)?);
+        let n = &self.cfg.node;
+        let io = crate::shadow::WriteIo { mb_s: n.snapshot_mb_s, chunk: n.snapshot_chunk_kb << 10, idle: n.snapshot_io_idle };
+        self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules, status, window, io)?);
         self.shadow_at = c.height;
         Ok(())
     }
@@ -281,9 +417,10 @@ impl Node {
 }
 
 impl Drop for Node {
-    /// Chi chiude il nodo trova su disco lo snapshot completo (o il precedente).
+    /// Chi chiude il nodo trova su disco tutti i blocchi eseguiti e lo snapshot completo
+    /// (o il precedente).
     fn drop(&mut self) {
-        if let Err(e) = self.wait_snapshot() {
+        if let Err(e) = self.publish(true).and_then(|_| self.wait_snapshot()) {
             eprintln!("{e}");
         }
     }
@@ -383,11 +520,11 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         };
         println!("{} ({}): height {}, hash {}", node.cfg.genesis.chain_name, node.cfg.genesis.chain_id, node.chain.height, node.chain.last_hash);
         let _ = ready_tx.send(Ok(()));
-        let res = node.serve(qrx, |n, ex| {
+        let res = node.serve(qrx, move |_n, ex, delta| {
             let _ = events.send(Arc::new(BlockEvent::new(ex)));
             // Il messaggio dello stream si costruisce solo se qualcuno ascolta.
             if blocks.receiver_count() > 0 {
-                let _ = blocks.send(Arc::new((ex.block.header.height, crate::stream::block_message(n, ex))));
+                let _ = blocks.send(Arc::new((ex.block.header.height, crate::stream::block_message_with(ex, delta))));
             }
             if !ex.block.txs.is_empty() {
                 let s = &ex.settlement;
@@ -467,4 +604,11 @@ pub fn read_keypair(path: &std::path::Path) -> Result<Keypair, String> {
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// Tempo passato da questo thread pronto ma senza CPU (run_delay di schedstat): VM, steal
+/// o altri thread. Zero se il kernel non espone schedstat.
+fn run_delay() -> Duration {
+    let s = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
+    Duration::from_nanos(s.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0))
 }

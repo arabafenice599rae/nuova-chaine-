@@ -200,7 +200,9 @@ pub fn transaction(r: &TxRecord, c: &Value) -> Value {
 }
 
 pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr>, arrived: std::time::Instant) -> R {
-    let height = n.chain.height;
+    // Altezza e blockhash pubblici: l'ultimo blocco durevole, qualunque commitment. Le
+    // letture degli account vedono lo stato eseguito (al massimo `journal_queue_blocks` blocchi avanti).
+    let height = n.durable_height;
     Ok(match method {
         "getHealth" => json!("ok"),
         "getSlot" | "getBlockHeight" => json!(height),
@@ -221,7 +223,7 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         }),
         "getLatestBlockhash" => {
             let last_valid = height + n.chain.params.blockhash_window as u64;
-            ctx(n, json!({"blockhash": n.chain.last_hash.to_string(), "lastValidBlockHeight": last_valid}))
+            ctx(n, json!({"blockhash": n.durable_hash.to_string(), "lastValidBlockHeight": last_valid}))
         }
         "isBlockhashValid" => {
             let h = Hash::from_str(&arg::<String>(p, 0)?).map_err(|e| invalid(e.to_string()))?;
@@ -273,14 +275,14 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
         "simulateTransaction" => {
             let mut tx = decode_tx(p)?;
             if cfg(p, 1)["replaceRecentBlockhash"].as_bool() == Some(true) {
-                tx.message.set_recent_blockhash(n.chain.last_hash);
+                tx.message.set_recent_blockhash(n.durable_hash);
             } else if let Err(e) = n.chain.check(&tx) {
                 return Ok(ctx(n, json!({"err": e, "logs": [], "accounts": null, "unitsConsumed": 0, "returnData": null})));
             }
             let mut v = simulate(n, tx);
             if cfg(p, 1)["replaceRecentBlockhash"].as_bool() == Some(true) {
                 let last_valid = height + n.chain.params.blockhash_window as u64;
-                v["replacementBlockhash"] = json!({"blockhash": n.chain.last_hash.to_string(), "lastValidBlockHeight": last_valid});
+                v["replacementBlockhash"] = json!({"blockhash": n.durable_hash.to_string(), "lastValidBlockHeight": last_valid});
             }
             ctx(n, v)
         }
