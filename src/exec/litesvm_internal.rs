@@ -17,6 +17,21 @@ pub use solana_transaction::TransactionError;
 
 pub struct Svm(LiteSVM);
 
+/// Programmi che litesvm carica di default e che questa chain non usa: Vote (builtin) e
+/// Stake (BPF, con il suo account programdata). Non c'è consenso a stake né ricompense:
+/// si chiudono con l'API pubblica (account vuoto = programma chiuso e account cancellato).
+pub fn unused_programs() -> [Address; 3] {
+    let stake = solana_sdk_ids::stake::id();
+    let programdata = Address::find_program_address(&[stake.as_ref()], &solana_sdk_ids::bpf_loader_upgradeable::id()).0;
+    [solana_sdk_ids::vote::id(), stake, programdata]
+}
+
+fn close_unused_programs(svm: &mut LiteSVM) {
+    for id in unused_programs() {
+        svm.set_account(id, Account::default()).expect("close unused program");
+    }
+}
+
 /// Esito di una transazione eseguita.
 pub struct Executed {
     pub result: TransactionResult,
@@ -46,7 +61,8 @@ impl Svm {
         // Clock a slot 0 prima di caricare i programmi: litesvm li registra allo
         // slot corrente e lo slot di ogni blocco sarà l'altezza (>= 1).
         svm.set_sysvar(&Clock::default());
-        let svm = svm.with_feature_accounts().with_default_programs().with_precompiles();
+        let mut svm = svm.with_feature_accounts().with_default_programs().with_precompiles();
+        close_unused_programs(&mut svm);
         Svm(svm)
     }
 
@@ -58,6 +74,8 @@ impl Svm {
         }
         svm.set_latest_blockhash(latest_blockhash);
         svm.rebuild_caches().map_err(|e| format!("rebuild_caches: {e:?}"))?;
+        // rebuild_caches registra di nuovo i builtin, Vote compreso: si richiude.
+        close_unused_programs(&mut svm);
         Ok(Svm(svm))
     }
 

@@ -85,7 +85,7 @@ centrifuga run centrifuga.toml
 
 `centrifuga genesis` costruisce lo stato iniziale e verifica:
 1. **conservazione**: somma di tutti i lamport, account di sistema inclusi
-   (6,481638061 CnFA di sysvar, builtin, feature, programmi e vault), = 100.000.000 CnFA esatti;
+   (5,4523437 CnFA di sysvar, builtin, feature, programmi e vault), = 100.000.000 CnFA esatti;
 2. **determinismo**: costruisce due volte, produce 20 blocchi di test su una copia,
    li riesegue sull'altra e confronta gli hash.
 
@@ -95,8 +95,21 @@ Allocazione (vault del programma timelock):
 |------------|----------------------------|-------------------------------------------------------|
 | `airdrop`  | 20M CnFA                   | claim: 100 CnFA fissi ai primi 200.000 aventi diritto; poi il residuo del fee mining; claim fino al blocco 708.480.000 |
 | `mining`   | 30M CnFA                   | premi del fee mining (lo muove solo il nodo)          |
-| `operator` | 20M CnFA                   | withdraw lineare per blocco in 48 mesi                |
-| `reserve`  | 30M − account di sistema   | solo claim a ondate dal blocco 315.360.000 (~12 mesi); riceve il 90% delle fee base durante il fee mining |
+| `operator` | 5M CnFA                    | withdraw lineare per blocco in 48 mesi                |
+| `reserve`  | 45M − account di sistema   | solo claim a ondate dal blocco 315.360.000 (~12 mesi); riceve il 90% delle fee base durante il fee mining |
+
+Con `network = "mainnet"` gli importi sono fissi: `centrifuga genesis` rifiuta valori
+diversi da 20M / 30M / 5M, uno sblocco dell'operatore diverso da 48 mesi e una riserva
+diversa da 45M meno gli account di sistema. Su devnet gli importi sono configurabili;
+la conservazione a 100M vale per entrambe le reti.
+
+**Lista airdrop**: solo pubkey da uno snapshot dello storico di Solana mainnet. Niente
+inviti, dati personali, collegamenti social o compiti da svolgere.
+
+**Operatore**: il vault `operator` esce solo con `withdraw` verso il beneficiario
+registrato. Né il genesis né il timelock contengono programmi o istruzioni per vendere
+CnFA dell'operatore (test: `operator_vault_has_no_other_exit` e l'elenco chiuso dei
+programmi del genesis).
 
 `network = "mainnet" | "devnet"`. I conti `[[genesis.prefund]]` (sottratti alla
 riserva) sono ammessi solo su devnet: su mainnet `centrifuga genesis` fallisce.
@@ -166,7 +179,7 @@ in un'altra cartella: stesso hash.
 
 ### Residuo del fee mining
 
-- Ha diritto chi è nella lista airdrop (storico Solana + inviti) e, **come
+- Ha diritto chi è nella lista airdrop (snapshot dello storico Solana) e, **come
   pagatore**, ha almeno 10 tx riuscite in almeno 5 giorni UTC diversi (timestamp
   dei blocchi del periodo di fee mining).
 - Quota uguale per tutti: min(1.000 CnFA, residuo / numero aventi diritto).
@@ -182,7 +195,15 @@ Hash della lista: *da pubblicare a fine fee mining* (blocco 630.720.000).
 
 Programmi nel genesis: System, SPL Token, Token-2022, Associated Token Account,
 Compute Budget, Memo, precompile ed25519/secp256k1 (più quelli che litesvm carica
-di default: Address Lookup Table, Stake).
+di default: Address Lookup Table, Memo v1, precompile secp256r1, ZK ElGamal proof).
+L'elenco è chiuso: un test fallisce se nel genesis compare un altro programma.
+**Vote e Stake non ci sono**: litesvm li carica di default, il genesis li chiude con l'API
+pubblica (account vuoto: programma chiuso e account cancellato) e il nodo li richiude dopo
+ogni riavvio da snapshot. Non c'è consenso a stake né ricompense; una tx che li invoca
+fallisce (test `vote_and_stake_programs_are_absent`). Restano due account creati da
+litesvm con le sysvar, **dati inerti senza programma**: la configurazione di Stake
+(`StakeConfig11111111111111111111111111111111`) e la sysvar StakeHistory, vuota. Nessun
+programma li legge o li modifica, e non hanno effetti su fee, ricompense o consenso..
 
 ## Deploy di programmi
 

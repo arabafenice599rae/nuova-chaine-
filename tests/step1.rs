@@ -53,9 +53,120 @@ fn genesis_conservation_and_programs() {
     let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
     assert_eq!(c.svm.lamports(&genesis::vault_address("airdrop")) - rent, 20_000_000 * LAMPORTS_PER_CNFA);
     assert_eq!(c.svm.lamports(&genesis::vault_address("mining")) - rent, 30_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("operator")) - rent, 5_000_000 * LAMPORTS_PER_CNFA);
+    // Riserva: 45M meno gli account di sistema (e il prefund di questo test su devnet).
+    assert_eq!(s.reserve_lamports, 45_000_000 * LAMPORTS_PER_CNFA - s.system_lamports - 10 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("reserve")) - rent, s.reserve_lamports);
+    // Programmi eseguibili nel genesis: solo questi (nessun programma di scambio o vendita).
+    let mut exec: Vec<String> = c.svm.accounts().iter().filter(|(_, a)| a.executable()).map(|(k, _)| k.to_string()).collect();
+    exec.sort();
+    let mut allowed: Vec<String> = progs.iter().map(|p| p.to_string()).collect();
+    allowed.extend([
+        genesis::timelock_program_id().to_string(),
+        // Caricati di default da litesvm (nessuno scambia o vende token).
+        "AddressLookupTab1e1111111111111111111111111".into(),
+        "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo".into(),
+        "Secp256r1SigVerify1111111111111111111111111".into(),
+        "ZkE1Gama1Proof11111111111111111111111111111".into(),
+    ]);
+    allowed.sort();
+    let extra: Vec<_> = exec.iter().filter(|p| !allowed.contains(p) && !p.starts_with("BPFLoader") && !p.starts_with("NativeLoader")).collect();
+    assert!(extra.is_empty(), "programmi non previsti nel genesis: {extra:?}");
     // Determinismo: due costruzioni, stesso hash.
     assert_eq!(chain(&cfg).genesis_hash, c.genesis_hash);
     genesis::check_determinism(&cfg.genesis, 5).unwrap();
+}
+
+fn mainnet(cfg: &Config) -> genesis::GenesisConfig {
+    let mut g = cfg.genesis.clone();
+    g.network = "mainnet".into();
+    g.chain_id = "centrifuga:mainnet".into();
+    g.prefund.clear();
+    g
+}
+
+#[test]
+fn mainnet_allocation_is_fixed() {
+    let (op, payer) = (Keypair::new(), Keypair::new());
+    let base = mainnet(&config("alloc-main", &op, &payer));
+    let (c, s) = genesis::build(&base).unwrap();
+    let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
+    let vault = |n: &str| c.svm.lamports(&genesis::vault_address(n)) - rent;
+    assert_eq!(vault("airdrop"), 20_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(vault("mining"), 30_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(vault("operator"), 5_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(vault("reserve") + s.system_lamports, 45_000_000 * LAMPORTS_PER_CNFA, "riserva = 45M - account di sistema");
+    assert_eq!(c.total_lamports(), SUPPLY_LAMPORTS as u128);
+    // Ogni importo diverso da 20M / 30M / 5M è rifiutato.
+    let changes: [fn(&mut genesis::GenesisConfig); 4] =
+        [|g| g.operator_cnfa = 20_000_000, |g| g.operator_cnfa = 4_999_999, |g| g.airdrop_cnfa += 1, |g| g.mining_cnfa -= 1];
+    for f in changes {
+        let mut g = base.clone();
+        f(&mut g);
+        let e = genesis::build(&g).err().expect("allocazione diversa rifiutata su mainnet");
+        assert!(e.contains("mainnet allocation"), "{e}");
+    }
+    // Sblocco dell'operatore: 48 mesi esatti.
+    let mut g = base.clone();
+    g.operator_unlock_blocks -= 1;
+    assert!(genesis::build(&g).err().unwrap().contains("48 months"));
+}
+
+#[test]
+fn devnet_allocation_is_configurable_but_conserved() {
+    let (op, payer) = (Keypair::new(), Keypair::new());
+    let mut g = config("alloc-dev", &op, &payer).genesis;
+    // Importi e sblocco diversi da mainnet: accettati, e la somma resta 100M esatti.
+    g.airdrop_cnfa = 1_000_000;
+    g.mining_cnfa = 2_000_000;
+    g.operator_cnfa = 20_000_000;
+    g.operator_unlock_blocks = 100;
+    let (c, s) = genesis::build(&g).unwrap();
+    let rent = c.svm.rent_exempt(genesis::VAULT_LEN);
+    assert_eq!(c.svm.lamports(&genesis::vault_address("operator")) - rent, 20_000_000 * LAMPORTS_PER_CNFA);
+    assert_eq!(s.reserve_lamports, 77_000_000 * LAMPORTS_PER_CNFA - s.system_lamports - 10 * LAMPORTS_PER_CNFA);
+    assert_eq!(c.total_lamports(), SUPPLY_LAMPORTS as u128);
+    // Oltre la supply: rifiutato dal controllo di conservazione.
+    g.operator_cnfa = 98_000_000;
+    assert!(genesis::build(&g).err().unwrap().contains("exceed the supply"));
+}
+
+/// Vote e Stake non ci sono: né nel genesis, né dopo un riavvio da snapshot, e una tx che
+/// li invoca fallisce.
+#[test]
+fn vote_and_stake_programs_are_absent() {
+    use centrifuga::exec::litesvm_internal::unused_programs;
+    let (op, payer) = (Keypair::new(), Keypair::new());
+    let mut cfg = config("no_vote_stake", &op, &payer);
+    cfg.node.snapshot_every = 2;
+    for k in unused_programs() {
+        let c = chain(&cfg);
+        assert!(c.svm.get(&k).is_none(), "{k} nel genesis");
+    }
+    let t0 = cfg.genesis.timestamp_ms;
+    let key = || Keypair::try_from(op.to_bytes().as_slice()).unwrap();
+    let mut n = Node::open(cfg.clone(), key()).unwrap();
+    // Una tx che invoca il programma: rifiutata (non inclusa) o inclusa con errore.
+    let call = |n: &mut Node, program: Address, i: u64| {
+        let ix = solana_instruction::Instruction { program_id: program, accounts: vec![], data: vec![0, 0, 0, 0] };
+        let msg = solana_message::Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &n.chain.last_hash);
+        let tx = solana_transaction::versioned::VersionedTransaction::try_new(solana_message::VersionedMessage::Legacy(msg), &[&payer]).unwrap();
+        n.ingress.submit(None, vec![tx]);
+        let ex = n.tick(t0 + i * 100).unwrap();
+        ex.results.first().map(|r| r.is_err())
+    };
+    let (vote, stake) = (unused_programs()[0], unused_programs()[1]);
+    for (i, p) in [vote, stake].into_iter().enumerate() {
+        assert_ne!(call(&mut n, p, i as u64 + 1), Some(false), "{p}: invocazione riuscita");
+    }
+    // snapshot_every = 2: lo snapshot del blocco 2 c'è; riavvio da snapshot + journal.
+    drop(n);
+    let n = Node::open(cfg, key()).unwrap();
+    assert!(centrifuga::ledger::read_snapshot(&n.cfg.node.data_dir).unwrap().is_some_and(|s| s.height == 2));
+    for k in unused_programs() {
+        assert!(n.chain.svm.get(&k).is_none(), "{k} dopo il riavvio da snapshot");
+    }
+    assert_eq!(n.chain.state_hash(), n.chain.full_state_hash());
 }
 
 #[test]

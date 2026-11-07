@@ -18,6 +18,16 @@ use crate::exec::{Chain, Identity, Params, Rules, Vaults};
 pub const LAMPORTS_PER_CNFA: u64 = 1_000_000_000;
 pub const SUPPLY_LAMPORTS: u64 = 100_000_000 * LAMPORTS_PER_CNFA;
 
+/// Allocazione fissa del genesis di mainnet, in CnFA: airdrop, fee mining, operatore.
+/// La riserva riceve il resto: 45M meno gli account di sistema. Su devnet gli importi
+/// sono configurabili; vale sempre la conservazione a 100M.
+pub const AIRDROP_CNFA: u64 = 20_000_000;
+pub const MINING_CNFA: u64 = 30_000_000;
+pub const OPERATOR_CNFA: u64 = 5_000_000;
+pub const RESERVE_CNFA: u64 = 45_000_000;
+/// Sblocco lineare dell'operatore su mainnet: 48 mesi (4 × 365 giorni) in ms.
+pub const OPERATOR_UNLOCK_MS: u64 = 4 * 365 * 86_400 * 1000;
+
 /// Programma timelock compilato (`programs/timelock`, sha256 nel README).
 pub const TIMELOCK_SO: &[u8] = include_bytes!("../../programs/timelock/centrifuga_timelock.so");
 
@@ -214,6 +224,14 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
     if g.claims_end_height < g.fee_mining_end_height {
         return Err("claims_end_height must follow fee_mining_end_height".into());
     }
+    let mainnet = g.network == "mainnet";
+    // Solo mainnet: importi fissi e sblocco dell'operatore in 48 mesi esatti.
+    if mainnet && (g.airdrop_cnfa, g.mining_cnfa, g.operator_cnfa) != (AIRDROP_CNFA, MINING_CNFA, OPERATOR_CNFA) {
+        return Err(format!("mainnet allocation must be airdrop {AIRDROP_CNFA}, mining {MINING_CNFA}, operator {OPERATOR_CNFA} CnFA (reserve: the rest)"));
+    }
+    if mainnet && g.operator_unlock_blocks.checked_mul(g.slot_ms) != Some(OPERATOR_UNLOCK_MS) {
+        return Err(format!("mainnet operator_unlock_blocks × slot_ms must be 48 months ({OPERATOR_UNLOCK_MS} ms)"));
+    }
     let mut svm = Svm::genesis(g.lamports_per_signature);
     svm.add_program(timelock_program_id(), TIMELOCK_SO)?;
     // Account di sistema: sysvar, builtin, feature, programmi (timelock incluso).
@@ -231,6 +249,10 @@ pub fn build(g: &GenesisConfig) -> Result<(Chain, Summary), String> {
         .try_fold(SUPPLY_LAMPORTS, |acc, (_, l)| acc.checked_sub(*l))
         .and_then(|x| x.checked_sub(system)?.checked_sub(VAULTS * rent)?.checked_sub(airdrop)?.checked_sub(mining)?.checked_sub(operator))
         .ok_or("allocations exceed the supply")?;
+    // Mainnet (senza prefund): riserva + account di sistema = 45M esatti.
+    if mainnet && reserve + system + VAULTS * rent != RESERVE_CNFA * LAMPORTS_PER_CNFA {
+        return Err("mainnet reserve must be 45M CnFA minus system accounts".into());
+    }
 
     let tl = timelock_program_id();
     let none = Address::default();
