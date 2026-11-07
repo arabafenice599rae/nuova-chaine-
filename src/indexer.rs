@@ -25,7 +25,7 @@ pub type Shared = Arc<Mutex<Box<dyn Archive>>>;
 pub fn open_archive(c: &IndexerConfig) -> Result<Box<dyn Archive>, String> {
     let dir = c.data_dir.join("archive");
     let e = |x: io::Error| format!("archivio: {x}");
-    Ok(Box::new(crate::archive::segments::Segments::open(&dir, c.segment_txs).map_err(e)?))
+    Ok(Box::new(crate::segments::Segments::open(&dir, c.segment_txs).map_err(e)?))
 }
 
 /// Blocco del journal a `off` (None se incompleto: il nodo lo sta ancora scrivendo).

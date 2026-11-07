@@ -29,7 +29,7 @@ pub const RESERVE_CNFA: u64 = 45_000_000;
 pub const OPERATOR_UNLOCK_MS: u64 = 4 * 365 * 86_400 * 1000;
 
 /// Programma timelock compilato (`programs/timelock`, sha256 nel README).
-pub const TIMELOCK_SO: &[u8] = include_bytes!("../../programs/timelock/centrifuga_timelock.so");
+pub const TIMELOCK_SO: &[u8] = include_bytes!("../../../programs/timelock/centrifuga_timelock.so");
 
 /// Id del programma timelock (fisso nel genesis): sha256("centrifuga:timelock").
 pub fn timelock_program_id() -> Address {

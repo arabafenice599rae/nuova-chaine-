@@ -1,0 +1,41 @@
+[package]
+name = "centrifuga-node"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Nodo centrifuga: esecuzione SVM, journal, snapshot, RPC e stream."
+
+[dependencies]
+litesvm = { version = "=0.18.2", features = ["persistence-internal", "precompiles"] }
+solana-account = "4.7"
+libc = "0.2"
+solana-address = { version = "~2.7", features = ["curve25519"] }
+solana-clock = "~3.2"
+solana-hash = "~4.6"
+solana-keypair = "3.1.2"
+solana-message = "4.6"
+solana-nonce = { version = "~3.3", features = ["wincode"] }
+solana-nonce-account = { version = "~4.3", features = ["wincode"] }
+solana-sdk-ids = "3.1"
+solana-signature = { version = "~3.5.2", features = ["verify"] }
+solana-signer = "3.0.1"
+solana-system-interface = { version = "3.3", features = ["bincode"] }
+solana-transaction = { version = "4.3", features = ["wincode", "verify"] }
+wincode = "0.6"
+sha2 = "0.10"
+ed25519-dalek = { version = "2.2", features = ["batch"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+centrifuga-timelock = { path = "../programs/timelock" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.30.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
+serde_json = "1"
+base64 = "0.22"
+bs58 = "0.5"
+solana-transaction-error = { version = "~3.4", features = ["serde"] }
+solana-lattice-hash = { version = "=4.3.2", features = ["agave-unstable-api"] }
+blake3 = "1.8"

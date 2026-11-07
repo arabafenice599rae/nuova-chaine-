@@ -270,7 +270,7 @@ async fn node_latency_is_reported_by_get_transaction() {
     let raw = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, wincode::serialize(&tx).unwrap());
     let sig = tx.signatures[0].to_string();
     let v = tokio::task::spawn_blocking(move || {
-        use centrifuga::rpc::client::call;
+        use centrifuga::client::call;
         call(&url, "sendTransaction", serde_json::json!([raw, {"encoding": "base64"}])).unwrap();
         loop {
             std::thread::sleep(Duration::from_millis(20));

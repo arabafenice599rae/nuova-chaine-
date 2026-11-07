@@ -9,9 +9,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use centrifuga::client::call;
 use centrifuga::genesis::{self, Config, LAMPORTS_PER_CNFA, Prefund};
 use centrifuga::node;
-use centrifuga::rpc::client::call;
 use serde_json::json;
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};

@@ -25,9 +25,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use centrifuga::client::call;
 use centrifuga::genesis::{self, Config, LAMPORTS_PER_CNFA, Prefund, transfer_tx};
 use centrifuga::node::{self, Node};
-use centrifuga::rpc::client::call;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use solana_account::Account;

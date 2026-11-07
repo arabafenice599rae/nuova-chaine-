@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use solana_address::Address;
 use solana_signature::Signature;
 
-use super::{Archive, HistoryEntry, R, TxRecord, decode, encode, keys};
+use crate::archive::{Archive, HistoryEntry, R, TxRecord, decode, encode, keys};
 
 const GROUP: &[u8; 4] = b"SEG1";
 

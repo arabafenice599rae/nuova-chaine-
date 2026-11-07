@@ -158,7 +158,7 @@ fn thread_cpu() -> std::collections::HashMap<(u64, String), f64> {
 /// HTTP; time until all are included. Then a short sample with preflight.
 fn rpc_tps(mut cfg: Config, op: &Keypair, senders: &[Keypair], n: u64, bh: solana_hash::Hash, count: u64) -> (f64, f64, u64, f64) {
     use base64::Engine;
-    use centrifuga::rpc::client::call;
+    use centrifuga::client::call;
     use serde_json::json;
     const CLIENTS: usize = 16;
     cfg.node.rpc_addr = "127.0.0.1:19300".into();

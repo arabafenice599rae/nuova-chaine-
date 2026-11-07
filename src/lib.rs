@@ -1,14 +1,10 @@
-//! centrifuga: chain SVM a validatore unico.
+//! centrifuga: CLI e strumenti (wallet, indexer, claims, client RPC, archivio a segmenti
+//! dell'indexer) sopra il nodo, che è nel crate `centrifuga-node`.
 
-pub mod archive;
+pub use centrifuga_node::{archive, exec, genesis, ingress, ledger, node, rpc, shadow, stream};
+
 pub mod claims;
-pub mod exec;
-pub mod genesis;
+pub mod client;
 pub mod indexer;
-pub mod ingress;
-pub mod ledger;
-pub mod node;
-pub mod rpc;
-pub mod shadow;
-pub mod stream;
+pub mod segments;
 pub mod wallet;

@@ -48,9 +48,9 @@ fn cmd_genesis(path: &Path) -> Result<(), String> {
 /// Saldo via JSON-RPC; il simbolo arriva da getVersion del nodo interrogato.
 fn cmd_balance(pubkey: &str, url: &str) -> Result<(), String> {
     genesis::parse_address(pubkey)?;
-    let version = centrifuga::rpc::client::call(url, "getVersion", serde_json::json!([]))?;
+    let version = centrifuga::client::call(url, "getVersion", serde_json::json!([]))?;
     let symbol = version["token"]["symbol"].as_str().unwrap_or("CnFA").to_string();
-    let r = centrifuga::rpc::client::call(url, "getBalance", serde_json::json!([pubkey]))?;
+    let r = centrifuga::client::call(url, "getBalance", serde_json::json!([pubkey]))?;
     let lamports = r["value"].as_u64().ok_or("invalid getBalance response")?;
     println!("{}", fmt_amount(lamports, &symbol));
     Ok(())
