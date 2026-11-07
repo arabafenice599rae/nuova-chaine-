@@ -120,9 +120,6 @@ fn config(dir: &Path, timestamp_ms: u64) -> Config {
     cfg.node.ingress_pending_per_payer = u32::MAX;
     cfg.node.ingress_tps_per_ip = u32::MAX;
     // Solo per le misure: finestra del recupero dello stream (default dalla config d'esempio).
-    if let Ok(v) = std::env::var("SNAPSHOT_CHUNK_KB") {
-        cfg.node.snapshot_chunk_kb = v.parse().expect("SNAPSHOT_CHUNK_KB");
-    }
     cfg.node.snapshot_io_idle = std::env::var("SNAPSHOT_IO_IDLE").is_ok_and(|v| v == "1");
     if let Ok(v) = std::env::var("JOURNAL_QUEUE_BLOCKS") {
         cfg.node.journal_queue_blocks = v.parse().expect("JOURNAL_QUEUE_BLOCKS");
@@ -431,7 +428,16 @@ fn main() {
     std::thread::sleep(Duration::from_millis(300));
     let (h, lh, sh, inc, stl, skipped) = rt
         .block_on(gw.query(|n: &mut Node| {
-            (n.chain.height, n.chain.last_hash, n.chain.state_hash(), n.index.count, n.index.statuses_len(), (n.snapshot_counts().0, n.snapshot_write_stats()))
+            (
+                n.chain.height,
+                n.chain.last_hash,
+                n.chain.state_hash(),
+                n.index.count,
+                n.index.statuses_len(),
+                n.shadow_stats().map_or((0, (0, 0)), |s| {
+                    (s.skipped.load(Ordering::Relaxed), (s.last_write_ms.load(Ordering::Relaxed), s.max_queue.load(Ordering::Relaxed)))
+                }),
+            )
         }))
         .unwrap();
     let (s, ac) = (sent.load(Ordering::Relaxed), accepted.load(Ordering::Relaxed));
@@ -449,7 +455,7 @@ fn main() {
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
     // Scomposizione della latenza dei campioni: invio -> eseguito -> durevole -> pubblicato -> visto.
     let times: std::collections::HashMap<u64, (u64, u64, u64)> =
-        rt.block_on(gw.query(|n: &mut Node| n.block_times.iter().map(|t| (t.0, (t.1, t.2, t.3))).collect())).unwrap();
+        rt.block_on(gw.query(|n: &mut Node| n.block_log.iter().map(|b| (b.height, (b.executed_ms, b.durable_ms, b.published_ms))).collect())).unwrap();
     let sm = sent_ms.lock().unwrap().clone();
     let (mut a, mut b, mut c, mut d) = (vec![], vec![], vec![], vec![]);
     for (s, slot, seen_ms) in &seen {
@@ -472,7 +478,7 @@ fn main() {
         pct(&mut d, 0.5),
         pct(&mut d, 0.99)
     );
-    let mut dl: Vec<f64> = rt.block_on(gw.query(|n: &mut Node| n.durable_log.clone())).unwrap().into_iter().map(|u| u as f64 / 1e3).collect();
+    let mut dl: Vec<f64> = rt.block_on(gw.query(|n: &mut Node| n.block_log.iter().map(|b| b.queued_us as f64 / 1e3).collect::<Vec<_>>())).unwrap();
     say!(
         "dall'accodamento al journal alla durabilità: p50 {:.1} / p99 {:.1} / max {:.1} ms (il blocco sopra è il tempo sul thread del nodo, attesa per coda piena compresa)",
         pct(&mut dl, 0.5),
@@ -481,7 +487,14 @@ fn main() {
     );
     // sync_data del journal: nella finestra reale di ogni snapshot (dall'inizio al rename),
     // nella finestra fissa di 600 blocchi dall'altezza dello snapshot, e nel resto.
-    let (sync_log, windows) = rt.block_on(gw.query(|n: &mut Node| (n.sync_log.clone(), n.snapshot_windows()))).unwrap();
+    let (sync_log, windows) = rt
+        .block_on(gw.query(|n: &mut Node| {
+            (
+                n.block_log.iter().map(|b| (b.height, b.durable_ms, b.sync_us)).collect::<Vec<_>>(),
+                n.shadow_stats().map_or(vec![], |s| s.windows.lock().unwrap().clone()),
+            )
+        }))
+        .unwrap();
     let dirty = dirty_samples.lock().unwrap().clone();
     let every_s = cfg.node.snapshot_every;
     say!("");

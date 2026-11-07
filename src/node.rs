@@ -51,15 +51,8 @@ pub struct Node {
     pub last_offset: Option<u64>,
     /// Durata dell'ultimo tick (µs): misura per i test di carico e il monitoraggio.
     pub last_tick_us: u64,
-    /// (altezza, ms unix, µs di sync_data del journal) di ogni blocco: solo misura.
-    pub sync_log: Vec<(u64, u64, u32)>,
-    /// µs dall'accodamento al journal alla durabilità, per blocco: solo misura.
-    pub durable_log: Vec<u32>,
-    /// Per blocco (ms unix): eseguito, durevole (fine del sync_data), pubblicato. Solo
-    /// misura, ultimi 100.000 blocchi.
-    pub block_times: VecDeque<(u64, u64, u64, u64)>,
-    /// Snapshot scritti: (altezza, ms unix di inizio e di fine, cioè del rename). Solo misura.
-    pub snapshot_log: Vec<(u64, u64, u64)>,
+    /// Misure per blocco, ultimi 1.000.000 (solo misura).
+    pub block_log: VecDeque<BlockLog>,
     /// Pausa dell'ultimo snapshot nel suo tick (µs: codifica degli stati e invio allo
     /// stato ombra; copia e scrittura sono su altri thread): solo misura.
     pub last_snapshot_us: u64,
@@ -137,10 +130,7 @@ impl Node {
             last_tick_ms: None,
             last_offset,
             last_tick_us: 0,
-            sync_log: vec![],
-            durable_log: vec![],
-            block_times: VecDeque::new(),
-            snapshot_log: vec![],
+            block_log: VecDeque::new(),
             last_snapshot_us: 0,
             shadow: None,
             slow_blocks: vec![],
@@ -233,12 +223,9 @@ impl Node {
         }
         if self.snapshot_due && self.pending.is_empty() {
             self.snapshot_due = false;
-            let (t, start) = (Instant::now(), crate::node::now_ms());
+            let t = Instant::now();
             self.snapshot()?;
             self.last_snapshot_us = t.elapsed().as_micros() as u64;
-            if self.shadow.is_none() {
-                self.snapshot_log.push((self.chain.height, start, crate::node::now_ms()));
-            }
         }
         Ok(out)
     }
@@ -262,9 +249,6 @@ impl Node {
             return Err(format!("journal: durable {} instead of {h}", d.height));
         }
         ex.phases.journal = d.write + d.sync;
-        if self.sync_log.len() < 1_000_000 {
-            self.sync_log.push((h, crate::node::now_ms(), d.sync.as_micros() as u32));
-        }
         let arrivals = &mut self.arrivals;
         let us: HashMap<_, _> =
             ex.block.txs.iter().filter_map(|t| arrivals.remove(&t.signatures[0]).map(|a| (t.signatures[0], a.elapsed().as_micros() as u64))).collect();
@@ -280,17 +264,15 @@ impl Node {
         self.snapshot_due |= every > 0 && h % every == 0;
         let ph = &mut ex.phases;
         ph.other = p.started.elapsed().saturating_sub(ph.exec + ph.hash + ph.sign + ph.journal);
-        // Dall'accodamento al journal alla durabilità (solo misura).
-        if self.durable_log.len() < 1_000_000 {
-            self.durable_log.push(p.started.elapsed().as_micros() as u32);
-        }
+        let queued_us = p.started.elapsed().as_micros() as u32;
         if let Some(mut f) = self.publisher.take() {
             f(self, &p.ex, &p.delta);
             self.publisher = Some(f);
         }
-        self.block_times.push_back((h, p.executed_ms, d.at_ms, crate::node::now_ms()));
-        if self.block_times.len() > 100_000 {
-            self.block_times.pop_front();
+        let sync_us = d.sync.as_micros() as u32;
+        self.block_log.push_back(BlockLog { height: h, executed_ms: p.executed_ms, durable_ms: d.at_ms, published_ms: now_ms(), sync_us, queued_us });
+        if self.block_log.len() > 1_000_000 {
+            self.block_log.pop_front();
         }
         Ok(p)
     }
@@ -366,7 +348,7 @@ impl Node {
         let status = self.index.encode(c.height);
         let window = c.params.blockhash_window as u64;
         let n = &self.cfg.node;
-        let io = crate::shadow::WriteIo { mb_s: n.snapshot_mb_s, chunk: n.snapshot_chunk_kb << 10, idle: n.snapshot_io_idle };
+        let io = crate::shadow::WriteIo { mb_s: n.snapshot_mb_s, idle: n.snapshot_io_idle };
         self.shadow = Some(crate::shadow::Shadow::start(self.dir.clone(), c.height, c.state_hash(), accounts, c.params.rules, status, window, io)?);
         self.shadow_at = c.height;
         Ok(())
@@ -381,8 +363,8 @@ impl Node {
         let c = &self.chain;
         let (height, gh, sh) = (c.height, c.genesis_hash, c.state_hash());
         if self.shadow.is_none() {
-            let accounts = c.svm.accounts().iter().map(|(k, a)| (*k, a.clone())).collect();
-            return write_snapshot_and_status(&self.dir, height, gh, sh, accounts, &self.index.encode(height));
+            ledger::write_snapshot(&self.dir, height, gh, sh, c.svm.accounts().iter()).map_err(|e| format!("snapshot {height}: {e}"))?;
+            return write_status(&self.dir, height, &self.index.encode(height));
         }
         if self.shadow_at != height {
             self.start_shadow()?;
@@ -398,21 +380,10 @@ impl Node {
         self.shadow.as_mut().map_or(Ok(()), |s| s.wait())
     }
 
-    /// Snapshot saltati (scrittore occupato, ombra persa o in errore) e scritti.
-    pub fn snapshot_counts(&self) -> (u64, u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.shadow.as_ref().map_or((0, 0), |s| (s.stats.skipped.load(Relaxed), s.stats.written.load(Relaxed)))
-    }
-
-    /// Snapshot scritti dall'ombra: (altezza, ms unix di inizio e del rename). Solo misura.
-    pub fn snapshot_windows(&self) -> Vec<(u64, u64, u64)> {
-        self.shadow.as_ref().map_or(vec![], |s| s.stats.windows.lock().unwrap().clone())
-    }
-
-    /// Durata dell'ultima scrittura (ms) e coda più lunga (blocchi) durante una scrittura.
-    pub fn snapshot_write_stats(&self) -> (u64, u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.shadow.as_ref().map_or((0, 0), |s| (s.stats.last_write_ms.load(Relaxed), s.stats.max_queue.load(Relaxed)))
+    /// Contatori dello stato ombra: snapshot saltati e scritti, durata e finestre delle
+    /// scritture, coda più lunga (None senza ombra).
+    pub fn shadow_stats(&self) -> Option<&crate::shadow::Stats> {
+        self.shadow.as_ref().map(|s| &*s.stats)
     }
 
     /// Solo test: accesso diretto al thread dell'ombra.
@@ -432,35 +403,32 @@ impl Drop for Node {
     }
 }
 
-/// Ordina, scrive `snapshot.tmp` e `status.tmp` con fsync, poi li rinomina (prima lo
-/// snapshot, poi gli stati della stessa altezza).
-pub fn write_snapshot_and_status(
-    dir: &std::path::Path,
-    height: u64,
-    genesis_hash: solana_hash::Hash,
-    state_hash: solana_hash::Hash,
-    mut accounts: Vec<(Address, solana_account::AccountSharedData)>,
-    status: &[u8],
-) -> Result<(), String> {
-    accounts.sort_unstable_by_key(|(k, _)| *k);
-    let tmp = dir.join("snapshot.tmp");
-    ledger::write_snapshot_file(&tmp, height, genesis_hash, state_hash, accounts.iter().map(|(k, a)| (k, a))).map_err(|e| format!("snapshot {height}: {e}"))?;
-    finish_snapshot(dir, height, status)
+/// Dopo `snapshot.tmp` scritto con fsync: rename dello snapshot, poi gli stati della
+/// stessa altezza.
+pub fn finish_snapshot(dir: &std::path::Path, height: u64, status: &[u8]) -> Result<(), String> {
+    std::fs::rename(dir.join("snapshot.tmp"), ledger::snapshot_path(dir)).map_err(|e| format!("snapshot {height}: {e}"))?;
+    write_status(dir, height, status)
 }
 
-/// Dopo `snapshot.tmp` scritto con fsync: `status.tmp` con fsync, poi i due rename
-/// (prima lo snapshot, poi gli stati della stessa altezza) e fsync della cartella.
-pub fn finish_snapshot(dir: &std::path::Path, height: u64, status: &[u8]) -> Result<(), String> {
-    use std::io::Write;
+/// `status.tmp` con fsync, rename in `status.bin` e fsync della cartella.
+fn write_status(dir: &std::path::Path, height: u64, status: &[u8]) -> Result<(), String> {
     let e = |e: std::io::Error| format!("snapshot {height}: {e}");
-    let tmp = dir.join("snapshot.tmp");
     let stmp = dir.join("status.tmp");
-    let mut f = std::fs::File::create(&stmp).map_err(e)?;
-    f.write_all(status).map_err(e)?;
-    f.sync_all().map_err(e)?;
-    std::fs::rename(&tmp, ledger::snapshot_path(dir)).map_err(e)?;
+    std::fs::File::create(&stmp).and_then(|mut f| std::io::Write::write_all(&mut f, status).and_then(|_| f.sync_all())).map_err(e)?;
     std::fs::rename(&stmp, dir.join("status.bin")).map_err(e)?;
     std::fs::File::open(dir).and_then(|d| d.sync_all()).map_err(e)
+}
+
+/// Misure di un blocco: ms unix di esecuzione, durabilità (fine del sync_data) e
+/// pubblicazione; µs del sync_data e dall'accodamento al journal alla durabilità.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockLog {
+    pub height: u64,
+    pub executed_ms: u64,
+    pub durable_ms: u64,
+    pub published_ms: u64,
+    pub sync_us: u32,
+    pub queued_us: u32,
 }
 
 /// Nodo avviato: thread del nodo + canali per RPC e stream.

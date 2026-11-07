@@ -7,7 +7,7 @@
 //! Lo storico completo non sta nel nodo: lo serve l'indexer (`centrifuga indexer`).
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
 use solana_signature::Signature;
@@ -96,15 +96,6 @@ impl TxIndex {
 
     pub fn statuses_len(&self) -> usize {
         self.statuses.len()
-    }
-
-    /// Accanto allo snapshot: contatore e stati della finestra (non lo storico).
-    pub fn save(&self, dir: &Path, height: u64) -> io::Result<()> {
-        let tmp = dir.join("status.tmp");
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&self.encode(height))?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, dir.join("status.bin"))
     }
 
     /// Contenuto di `status.bin` per lo snapshot all'altezza `height`.
