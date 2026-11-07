@@ -244,10 +244,11 @@ fn slow_shadow_skips_snapshots_without_slowing_the_node() {
     for i in 1..=blocks {
         let t = std::time::Instant::now();
         n.tick(t0 + i * 100).unwrap();
-        slowest = slowest.max(t.elapsed().as_millis());
+        slowest = slowest.max(node_ms(&n, t));
     }
-    let elapsed = started.elapsed();
-    assert!(elapsed < std::time::Duration::from_secs(3), "il nodo non ha aspettato l'ombra: {elapsed:?}");
+    let sync: u64 = n.sync_log.iter().map(|s| s.2 as u64).sum();
+    let elapsed = started.elapsed().saturating_sub(std::time::Duration::from_micros(sync));
+    assert!(elapsed < std::time::Duration::from_secs(3), "il nodo non ha aspettato l'ombra: {elapsed:?} (senza i sync_data)");
     assert!(slowest < 200, "tick più lento {slowest} ms");
     assert!(n.shadow_for_test().unwrap().lost(), "ombra persa");
     let (skipped, _) = n.snapshot_counts();
@@ -276,7 +277,7 @@ fn write_interrupted_when_queue_fills_then_shadow_recovers() {
         block(&mut c, t0, i);
         let t = std::time::Instant::now();
         block(&mut n, t0, i);
-        slowest = slowest.max(t.elapsed().as_millis());
+        slowest = slowest.max(node_ms(&n, t));
     }
     {
         let s = n.shadow_for_test().unwrap();
@@ -295,4 +296,11 @@ fn write_interrupted_when_queue_fills_then_shadow_recovers() {
     assert!(!n.shadow_for_test().unwrap().lost(), "l'ombra non si è persa: ha recuperato");
     assert_eq!(ledger::read_snapshot(&d).unwrap().unwrap().height, 40);
     assert_eq!(std::fs::read(d.join("snapshot.bin")).unwrap(), reference(&c, "shadow_interrupt_ref_snap"), "dopo il recupero lo snapshot è esatto");
+}
+
+/// Tempo di un blocco sul nodo, senza il sync_data del journal (dipende dal disco, non
+/// dall'ombra: sulla CI supera a volte i 100 ms).
+fn node_ms(n: &Node, t: std::time::Instant) -> u128 {
+    let sync = std::time::Duration::from_micros(n.sync_log.last().map_or(0, |s| s.2 as u64));
+    t.elapsed().saturating_sub(sync).as_millis()
 }

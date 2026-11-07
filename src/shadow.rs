@@ -27,6 +27,15 @@ use crate::stream::{Accounts, Replica};
 /// Blocchi in coda al massimo verso il thread dell'ombra (~60 s a 100 ms per blocco).
 pub const QUEUE_BLOCKS: usize = 600;
 
+/// Scrittura dello snapshot sul disco: banda (MB/s, 0 = nessun limite), blocchi (byte),
+/// priorità I/O idle del thread dell'ombra.
+#[derive(Clone, Copy, Debug)]
+pub struct WriteIo {
+    pub mb_s: u64,
+    pub chunk: u64,
+    pub idle: bool,
+}
+
 pub enum Msg {
     /// Delta del blocco e stati delle sue tx (firma, errore).
     Block {
@@ -95,7 +104,7 @@ impl Shadow {
         rules: crate::exec::Rules,
         status: Vec<u8>,
         window: u64,
-        mb_s: u64,
+        io: WriteIo,
     ) -> Result<Shadow, String> {
         let (tx, rx) = std::sync::mpsc::sync_channel(QUEUE_BLOCKS);
         let stats = Arc::new(Stats::default());
@@ -106,7 +115,7 @@ impl Shadow {
                 let mut index = TxIndex::new(window, 0, 0);
                 let rep =
                     index.decode(&status, height).map_err(|e| format!("status: {e}")).and_then(|()| Replica::from_state(height, state_hash, accounts, rules));
-                run(dir, rep, index, rx, st, mb_s)
+                run(dir, rep, index, rx, st, io)
             })
             .map_err(|e| format!("shadow thread: {e}"))?;
         Ok(Shadow { tx, lost: false, stats, handle: Some(handle) })
@@ -190,8 +199,7 @@ struct State {
     st: Arc<Stats>,
     slow: Duration,
     queue_limit: usize,
-    /// Banda massima della scrittura (MB/s, 0 = nessun limite).
-    mb_s: u64,
+    io: WriteIo,
 }
 
 impl State {
@@ -240,8 +248,10 @@ impl State {
         let tmp = self.dir.join("snapshot.tmp");
         let result = (|| -> Result<bool, String> {
             let e = |e: std::io::Error| format!("snapshot {height}: {e}");
-            let mut w =
-                crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?.with_rate(self.mb_s);
+            let mut w = crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64)
+                .map_err(e)?
+                .with_rate(self.io.mb_s)
+                .with_chunk(self.io.chunk);
             let mut lt = crate::exec::state_hash::LtState::empty();
             for (i, (k, a)) in r.accounts().iter().enumerate() {
                 w.push(k, a).map_err(e)?;
@@ -298,8 +308,16 @@ impl State {
     }
 }
 
-fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>, mb_s: u64) {
+fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<Msg>, st: Arc<Stats>, io: WriteIo) {
     lower_priority();
+    if io.idle {
+        // IOPRIO_WHO_PROCESS sul thread corrente (0), classe IDLE (3 << 13).
+        // SAFETY: syscall senza puntatori.
+        let r = unsafe { libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13) };
+        if r != 0 {
+            eprintln!("shadow: could not set the I/O priority to idle");
+        }
+    }
     let rep = match rep {
         Ok(r) => Some(r),
         Err(e) => {
@@ -307,7 +325,7 @@ fn run(dir: PathBuf, rep: Result<Replica, String>, index: TxIndex, rx: Receiver<
             None
         }
     };
-    let mut state = State { dir, rep, index, st, slow: Duration::ZERO, queue_limit: QUEUE_BLOCKS, mb_s };
+    let mut state = State { dir, rep, index, st, slow: Duration::ZERO, queue_limit: QUEUE_BLOCKS, io };
     while let Ok(m) = rx.recv() {
         state.handle(m, &rx);
     }

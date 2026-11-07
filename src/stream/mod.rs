@@ -86,6 +86,11 @@ pub fn header_message(b: &Block) -> String {
     block_json(b, None).to_string()
 }
 
+/// Messaggio live per un blocco durevole, con il delta calcolato dopo l'esecuzione.
+pub fn block_message_with(ex: &Executed, delta: &Accounts) -> String {
+    block_json(&ex.block, Some(delta)).to_string()
+}
+
 /// Messaggio live per un blocco appena prodotto (sul thread del nodo): lo stesso delta
 /// già calcolato per lo stato ombra, se è di questo blocco.
 pub fn block_message(n: &Node, ex: &Executed) -> String {
@@ -174,7 +179,15 @@ async fn conn(s: Stream, c: tokio::net::TcpStream) {
     // Prima l'iscrizione, poi il recupero: nessun blocco può cadere nel mezzo.
     let mut live = s.blocks.subscribe();
     let (otx, orx) = oneshot::channel();
-    if s.queries.send(Box::new(move |n: &mut Node| drop(otx.send(catchup(n, from))))).is_err() {
+    // Prima del recupero tutto ciò che è eseguito diventa durevole: lo stato completo e
+    // il delta sono ancorati all'ultimo blocco, che deve essere sul journal.
+    if s.queries
+        .send(Box::new(move |n: &mut Node| {
+            let _ = n.flush();
+            drop(otx.send(catchup(n, from)))
+        }))
+        .is_err()
+    {
         return;
     }
     let Ok(Some(cu)) = orx.await else {

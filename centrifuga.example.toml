@@ -5,6 +5,7 @@ logo_url = ""                   # URL del logo in getChainInfo e /chain.json
 data_dir = "data"
 operator_keypair = "operator.json"  # formato solana-keygen (array JSON di 64 byte)
 snapshot_every = 3000           # blocchi (5 minuti a 100 ms)
+journal_queue_blocks = 10        # blocchi eseguiti e non ancora durevoli, al massimo (1 s a 100 ms)
 snapshot_mb_s = 100             # banda massima della scrittura dello snapshot (MB/s, 0 = nessun limite)
 max_block_txs = 5000
 rpc_addr = "127.0.0.1:8899"    # WebSocket su 8900

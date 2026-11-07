@@ -120,6 +120,13 @@ fn config(dir: &Path, timestamp_ms: u64) -> Config {
     cfg.node.ingress_pending_per_payer = u32::MAX;
     cfg.node.ingress_tps_per_ip = u32::MAX;
     // Solo per le misure: finestra del recupero dello stream (default dalla config d'esempio).
+    if let Ok(v) = std::env::var("SNAPSHOT_CHUNK_KB") {
+        cfg.node.snapshot_chunk_kb = v.parse().expect("SNAPSHOT_CHUNK_KB");
+    }
+    cfg.node.snapshot_io_idle = std::env::var("SNAPSHOT_IO_IDLE").is_ok_and(|v| v == "1");
+    if let Ok(v) = std::env::var("JOURNAL_QUEUE_BLOCKS") {
+        cfg.node.journal_queue_blocks = v.parse().expect("JOURNAL_QUEUE_BLOCKS");
+    }
     if let Ok(v) = std::env::var("SNAPSHOT_EVERY") {
         cfg.node.snapshot_every = v.parse().expect("SNAPSHOT_EVERY");
     }
@@ -167,6 +174,19 @@ fn main() {
     let cfg = config(&dir, ts);
     initial_state(&cfg, n);
     std::fs::copy(dir.join("snapshot.bin"), dir.join("snapshot0.bin")).unwrap();
+    // Prima di avviare il nodo: snapshot iniziale e copia su disco, Dirty sotto 16 MB.
+    std::fs::File::open(dir.join("snapshot0.bin")).and_then(|f| f.sync_all()).unwrap();
+    let dirty_kb = || {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|m| m.lines().find(|l| l.starts_with("Dirty:")).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()))
+            .unwrap_or(0)
+    };
+    let waited = Instant::now();
+    while dirty_kb() > 16 * 1024 && waited.elapsed() < Duration::from_secs(300) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    say!("avvio: snapshot iniziale su disco, Dirty {} MB dopo {:.1} s di attesa", dirty_kb() / 1024, waited.elapsed().as_secs_f64());
     let ram0 = rss_mb();
     let running = node::start(cfg.clone(), key(u64::MAX)).unwrap();
     let gw = running.gateway.clone();
@@ -181,6 +201,9 @@ fn main() {
     let samples: Arc<Mutex<Vec<(Signature, u64)>>> = Arc::default();
     // Latenza invio -> inclusione: stessi campioni, con l'istante dell'invio.
     let pending: Arc<Mutex<Vec<(Signature, Instant)>>> = Arc::default();
+    // Ora di invio (ms unix) dei campioni e altezza in cui sono stati inclusi: per scomporre la latenza.
+    let sent_ms: Arc<Mutex<std::collections::HashMap<Signature, u64>>> = Arc::default();
+    let mut seen: Vec<(Signature, u64, u64)> = vec![];
     say!(
         "{n} account, {tps} tx/s richiesti, {minutes} minuti, invio {}, rpc_recent_txs {}, snapshot ogni {} blocchi, stream_catchup_blocks {}",
         if via_rpc { "via HTTP/JSON-RPC (end-to-end)" } else { "diretto all'ingresso (limite del nodo)" },
@@ -192,8 +215,8 @@ fn main() {
     let load_from = rt.block_on(gw.query(|n: &mut Node| n.chain.height)).unwrap();
     let mut signers = vec![];
     for w in 0..signers_n {
-        let (ingress, bh, height, sent, accepted, stop, samples, pending) =
-            (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone(), pending.clone());
+        let (ingress, bh, height, sent, accepted, stop, samples, pending, sent_ms) =
+            (ingress.clone(), bh.clone(), height.clone(), sent.clone(), accepted.clone(), stop.clone(), samples.clone(), pending.clone(), sent_ms.clone());
         let rate = tps as f64 / signers_n as f64;
         let senders: Vec<Keypair> = (0..SENDERS).filter(|i| i % signers_n == w).map(key).collect();
         signers.push(
@@ -219,6 +242,7 @@ fn main() {
                         if k % 1_000 < 50 {
                             samples.lock().unwrap().push((batch[0].signatures[0], height.load(Ordering::Relaxed)));
                             pending.lock().unwrap().push((batch[0].signatures[0], Instant::now())); // batch[0] parte per prima
+                            sent_ms.lock().unwrap().insert(batch[0].signatures[0], node::now_ms());
                         }
                         let ok = if via_rpc {
                             use base64::Engine;
@@ -293,20 +317,28 @@ fn main() {
                 snap_pauses.push(snap_us as f64 / 1e3); // scrittura dello snapshot, dentro il suo tick
                 snap_rss.push((h / every * every, rss_last, Instant::now() + Duration::from_secs(60)));
             }
-            // Campioni inclusi in questo blocco: latenza dall'invio (risoluzione ~40 ms).
-            let waiting: Vec<(Signature, Instant)> = std::mem::take(&mut *pending.lock().unwrap());
-            if !waiting.is_empty() {
-                let sigs: Vec<Signature> = waiting.iter().map(|w| w.0).collect();
-                let found = rt.block_on(gw.query(move |n: &mut Node| sigs.iter().map(|s| n.index.status(s).is_some()).collect::<Vec<_>>())).unwrap();
-                let mut back = vec![];
-                for (w, f) in waiting.into_iter().zip(found) {
-                    if f { lat.push(w.1.elapsed().as_secs_f64() * 1e3) } else { back.push(w) }
-                }
-                pending.lock().unwrap().extend(back);
-            }
+
             last_h = h;
             *bh.lock().unwrap() = lh;
             height.store(h, Ordering::Relaxed);
+        }
+        // Campioni con lo stato visibile (blocco durevole): latenza dall'invio, controllata a
+        // ogni giro (risoluzione ~40 ms), non solo quando cambia l'altezza eseguita.
+        let waiting: Vec<(Signature, Instant)> = std::mem::take(&mut *pending.lock().unwrap());
+        if !waiting.is_empty() {
+            let sigs: Vec<Signature> = waiting.iter().map(|w| w.0).collect();
+            let found = rt.block_on(gw.query(move |n: &mut Node| sigs.iter().map(|s| n.index.status(s).map(|x| x.0)).collect::<Vec<_>>())).unwrap();
+            let mut back = vec![];
+            for (w, f) in waiting.into_iter().zip(found) {
+                match f {
+                    Some(slot) => {
+                        lat.push(w.1.elapsed().as_secs_f64() * 1e3);
+                        seen.push((w.0, slot, node::now_ms()));
+                    }
+                    None => back.push(w),
+                }
+            }
+            pending.lock().unwrap().extend(back);
         }
         let rss = rss_mb();
         snap_rss.retain(|&(sh, before, due)| {
@@ -415,6 +447,38 @@ fn main() {
         pct(&mut all_ticks, 1.0)
     );
     say!("RAM: all'inizio {ram0} MB, prima del nodo; alla fine {} MB; stati in RAM {stl}", rss_mb());
+    // Scomposizione della latenza dei campioni: invio -> eseguito -> durevole -> pubblicato -> visto.
+    let times: std::collections::HashMap<u64, (u64, u64, u64)> =
+        rt.block_on(gw.query(|n: &mut Node| n.block_times.iter().map(|t| (t.0, (t.1, t.2, t.3))).collect())).unwrap();
+    let sm = sent_ms.lock().unwrap().clone();
+    let (mut a, mut b, mut c, mut d) = (vec![], vec![], vec![], vec![]);
+    for (s, slot, seen_ms) in &seen {
+        if let (Some(t0), Some((ex, du, pu))) = (sm.get(s), times.get(slot)) {
+            a.push(ex.saturating_sub(*t0) as f64);
+            b.push(du.saturating_sub(*ex) as f64);
+            c.push(pu.saturating_sub(*du) as f64);
+            d.push(seen_ms.saturating_sub(*pu) as f64);
+        }
+    }
+    say!(
+        "latenza scomposta ({} campioni), p50 / p99 ms: invio -> eseguito {:.0} / {:.0}; eseguito -> durevole {:.0} / {:.0}; durevole -> pubblicato {:.0} / {:.0}; pubblicato -> visto dal soak {:.0} / {:.0}",
+        a.len(),
+        pct(&mut a, 0.5),
+        pct(&mut a, 0.99),
+        pct(&mut b, 0.5),
+        pct(&mut b, 0.99),
+        pct(&mut c, 0.5),
+        pct(&mut c, 0.99),
+        pct(&mut d, 0.5),
+        pct(&mut d, 0.99)
+    );
+    let mut dl: Vec<f64> = rt.block_on(gw.query(|n: &mut Node| n.durable_log.clone())).unwrap().into_iter().map(|u| u as f64 / 1e3).collect();
+    say!(
+        "dall'accodamento al journal alla durabilità: p50 {:.1} / p99 {:.1} / max {:.1} ms (il blocco sopra è il tempo sul thread del nodo, attesa per coda piena compresa)",
+        pct(&mut dl, 0.5),
+        pct(&mut dl, 0.99),
+        pct(&mut dl, 1.0)
+    );
     // sync_data del journal: nella finestra reale di ogni snapshot (dall'inizio al rename),
     // nella finestra fissa di 600 blocchi dall'altezza dello snapshot, e nel resto.
     let (sync_log, windows) = rt.block_on(gw.query(|n: &mut Node| (n.sync_log.clone(), n.snapshot_windows()))).unwrap();
@@ -497,12 +561,13 @@ fn main() {
         slow.len(),
         slow.iter()
             .map(|(h, us, p)| format!(
-                "[{h}: {:.0} ms = esecuzione {:.0} + hash {:.0} + firma {:.0} + journal {:.0} + altro {:.0}]",
+                "[{h}: {:.0} ms = coda del journal piena {:.0} + attesa CPU {:.0} + esecuzione {:.0} + hash {:.0} + firma {:.0} + altro {:.0}]",
                 *us as f64 / 1e3,
+                ms(p.queue),
+                ms(p.cpu_wait),
                 ms(p.exec),
                 ms(p.hash),
                 ms(p.sign),
-                ms(p.journal),
                 ms(p.other)
             ))
             .collect::<Vec<_>>()

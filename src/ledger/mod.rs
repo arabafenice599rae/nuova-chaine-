@@ -137,6 +137,7 @@ pub struct SnapshotWriter {
     pos: u64,
     synced: u64,
     mb_s: u64,
+    chunk: u64,
     started: std::time::Instant,
 }
 
@@ -148,7 +149,13 @@ impl SnapshotWriter {
         w.write_all(genesis_hash.as_ref())?;
         w.write_all(state_hash.as_ref())?;
         w.write_all(&count.to_le_bytes())?;
-        Ok(SnapshotWriter { w, pos: 88, synced: 0, mb_s: 0, started: std::time::Instant::now() })
+        Ok(SnapshotWriter { w, pos: 88, synced: 0, mb_s: 0, chunk: SNAP_CHUNK, started: std::time::Instant::now() })
+    }
+
+    /// Dimensione dei blocchi di scrittura (byte, almeno 64 KB).
+    pub fn with_chunk(mut self, bytes: u64) -> SnapshotWriter {
+        self.chunk = bytes.max(64 << 10);
+        self
     }
 
     /// Limite di banda della scrittura (0 = nessuno).
@@ -167,7 +174,7 @@ impl SnapshotWriter {
         w.write_all(&(a.data().len() as u64).to_le_bytes())?;
         w.write_all(a.data())?;
         self.pos += 89 + a.data().len() as u64;
-        if self.pos - self.synced >= SNAP_CHUNK {
+        if self.pos - self.synced >= self.chunk {
             self.chunk()?;
         }
         Ok(())
@@ -246,4 +253,103 @@ pub fn read_snapshot(dir: &Path) -> io::Result<Option<Snapshot>> {
         accounts.push((key, a));
     }
     Ok(Some(Snapshot { height, genesis_hash, state_hash, accounts }))
+}
+
+/// Un blocco reso durevole dal thread del journal.
+#[derive(Clone, Copy, Debug)]
+pub struct Durable {
+    pub height: u64,
+    pub offset: u64,
+    /// Write e sync_data del gruppo che lo contiene (uguali per tutti i blocchi del gruppo).
+    pub write: std::time::Duration,
+    pub sync: std::time::Duration,
+    /// Blocchi scritti con la stessa write e lo stesso sync_data.
+    pub group: usize,
+    /// Fine del sync_data (ms unix): solo misura.
+    pub at_ms: u64,
+}
+
+/// Thread del journal: riceve i blocchi già eseguiti (coda limitata), li scrive e fa
+/// sync_data; i blocchi arrivati nel frattempo vanno insieme, con una sola write e un
+/// solo sync (group commit). Ogni blocco durevole torna al nodo con il suo offset.
+pub struct JournalThread {
+    tx: Option<std::sync::mpsc::SyncSender<(u64, Vec<u8>)>>,
+    pub done: std::sync::mpsc::Receiver<Result<Durable, String>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    /// Solo test: trattiene le scritture (come un disco fermo) o le scarta (crash).
+    pub hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub discard: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl JournalThread {
+    pub fn start(mut journal: Journal, queue: usize) -> Result<JournalThread, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(queue);
+        let (dtx, done) = std::sync::mpsc::channel();
+        let (hold, discard) = (std::sync::Arc::new(Default::default()), std::sync::Arc::new(Default::default()));
+        let (h, d): (std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::atomic::AtomicBool>) =
+            (std::sync::Arc::clone(&hold), std::sync::Arc::clone(&discard));
+        let handle = std::thread::Builder::new()
+            .name("centrifuga-journal".into())
+            .spawn(move || {
+                while let Ok(first) = rx.recv() {
+                    while h.load(Relaxed) && !d.load(Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    let mut batch = vec![first];
+                    batch.extend(std::iter::from_fn(|| rx.try_recv().ok()));
+                    if d.load(Relaxed) {
+                        return; // crash simulato: niente arriva su disco
+                    }
+                    let mut buf = Vec::new();
+                    let mut at = Vec::with_capacity(batch.len());
+                    for (height, bytes) in &batch {
+                        at.push((*height, journal.end + buf.len() as u64));
+                        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                        buf.extend_from_slice(bytes);
+                    }
+                    let t = std::time::Instant::now();
+                    let res = journal.file.write_all(&buf).map(|_| t.elapsed()).and_then(|w| {
+                        let t = std::time::Instant::now();
+                        journal.file.sync_data().map(|_| (w, t.elapsed()))
+                    });
+                    match res {
+                        Ok((write, sync)) => {
+                            journal.end += buf.len() as u64;
+                            let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                            for (height, offset) in at {
+                                let _ = dtx.send(Ok(Durable { height, offset, write, sync, group: batch.len(), at_ms }));
+                            }
+                        }
+                        Err(e) => {
+                            let _ = dtx.send(Err(format!("journal: {e}")));
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| format!("journal thread: {e}"))?;
+        Ok(JournalThread { tx: Some(tx), done, handle: Some(handle), hold, discard })
+    }
+
+    /// Senza thread (dopo un crash simulato nei test).
+    pub fn dead() -> JournalThread {
+        let (_, done) = std::sync::mpsc::channel();
+        JournalThread { tx: None, done, handle: None, hold: Default::default(), discard: Default::default() }
+    }
+
+    /// Accoda un blocco; con la coda piena aspetta (backpressure, nessun blocco scartato).
+    pub fn send(&self, height: u64, bytes: Vec<u8>) -> Result<(), String> {
+        self.tx.as_ref().ok_or("journal closed")?.send((height, bytes)).map_err(|_| "journal thread stopped".to_string())
+    }
+}
+
+impl Drop for JournalThread {
+    /// Chiude la coda: il thread scrive ciò che c'è (salvo crash simulato) e finisce.
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }

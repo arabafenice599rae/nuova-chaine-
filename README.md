@@ -223,6 +223,19 @@ journal.
 
 ## JSON-RPC per i wallet
 
+**Durabilità.** Il journal si scrive su un thread separato: il nodo esegue il blocco
+successivo mentre il precedente va su disco (al massimo `journal_queue_blocks` blocchi
+eseguiti e non ancora durevoli, default 10 = 1 s; oltre, il nodo aspetta il disco). Blocchi, conferme e stream escono solo dopo
+che il blocco è durevole:
+- `getSlot`, `getBlockHeight`, `getEpochInfo`, `getLatestBlockhash`: l'ultimo blocco
+  durevole, qualunque commitment;
+- `getSignatureStatuses`, `getTransaction`: solo tx di blocchi durevoli (prima, nessuno
+  stato);
+- stream: blocchi e recupero solo durevoli;
+- `getBalance`, `getAccountInfo`, `simulateTransaction`: lo stato eseguito, al massimo
+  `journal_queue_blocks` blocchi avanti. **Dopo un crash queste letture possono tornare
+  indietro di al massimo `journal_queue_blocks` blocchi; conferme e blocchi mai.**
+
 Il gateway (`src/rpc/`) è solo un adattatore per i wallet: HTTP su `rpc_addr`
 (default `127.0.0.1:8899`), WebSocket sulla porta successiva (8900), come si
 aspettano i client Solana. I metodi girano sul thread del nodo tra un blocco e
