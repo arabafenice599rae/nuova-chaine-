@@ -98,8 +98,9 @@ pub struct NodeConfig {
     /// journal): dopo un crash le letture degli account tornano indietro al più di tanti.
     #[serde(default = "default_journal_queue_blocks")]
     pub journal_queue_blocks: usize,
-    /// Priorità I/O idle per la scrittura dello snapshot (thread dell'ombra).
-    #[serde(default)]
+    /// Priorità I/O idle per la scrittura dello snapshot (thread dell'ombra), default sì:
+    /// a 10M account dimezza i picchi del sync_data del journal durante lo snapshot.
+    #[serde(default = "yes")]
     pub snapshot_io_idle: bool,
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
@@ -322,6 +323,10 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_journal_queue_blocks() -> usize {

@@ -120,7 +120,9 @@ fn config(dir: &Path, timestamp_ms: u64) -> Config {
     cfg.node.ingress_pending_per_payer = u32::MAX;
     cfg.node.ingress_tps_per_ip = u32::MAX;
     // Solo per le misure: finestra del recupero dello stream (default dalla config d'esempio).
-    cfg.node.snapshot_io_idle = std::env::var("SNAPSHOT_IO_IDLE").is_ok_and(|v| v == "1");
+    if let Ok(v) = std::env::var("SNAPSHOT_IO_IDLE") {
+        cfg.node.snapshot_io_idle = v == "1";
+    }
     if let Ok(v) = std::env::var("JOURNAL_QUEUE_BLOCKS") {
         cfg.node.journal_queue_blocks = v.parse().expect("JOURNAL_QUEUE_BLOCKS");
     }
