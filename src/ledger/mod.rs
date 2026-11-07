@@ -17,8 +17,6 @@ pub struct Journal {
     file: File,
     /// Offset di fine file: dove inizierà il prossimo record.
     end: u64,
-    /// Durata dell'ultimo sync_data (solo misura).
-    pub last_sync: std::time::Duration,
 }
 
 impl Journal {
@@ -48,22 +46,7 @@ impl Journal {
             eprintln!("journal: truncating {} incomplete trailing bytes", total - good);
             file.set_len(good).map_err(|e| e.to_string())?;
         }
-        Ok(Journal { file, end: good, last_sync: Default::default() })
-    }
-
-    /// Accoda un blocco e ne restituisce l'offset.
-    pub fn append(&mut self, b: &Block) -> io::Result<u64> {
-        let bytes = b.encode();
-        let mut rec = Vec::with_capacity(4 + bytes.len());
-        rec.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        rec.extend_from_slice(&bytes);
-        self.file.write_all(&rec)?;
-        let t = std::time::Instant::now();
-        self.file.sync_data()?;
-        self.last_sync = t.elapsed();
-        let at = self.end;
-        self.end += rec.len() as u64;
-        Ok(at)
+        Ok(Journal { file, end: good })
     }
 }
 
@@ -137,7 +120,6 @@ pub struct SnapshotWriter {
     pos: u64,
     synced: u64,
     mb_s: u64,
-    chunk: u64,
     started: std::time::Instant,
 }
 
@@ -149,13 +131,7 @@ impl SnapshotWriter {
         w.write_all(genesis_hash.as_ref())?;
         w.write_all(state_hash.as_ref())?;
         w.write_all(&count.to_le_bytes())?;
-        Ok(SnapshotWriter { w, pos: 88, synced: 0, mb_s: 0, chunk: SNAP_CHUNK, started: std::time::Instant::now() })
-    }
-
-    /// Dimensione dei blocchi di scrittura (byte, almeno 64 KB).
-    pub fn with_chunk(mut self, bytes: u64) -> SnapshotWriter {
-        self.chunk = bytes.max(64 << 10);
-        self
+        Ok(SnapshotWriter { w, pos: 88, synced: 0, mb_s: 0, started: std::time::Instant::now() })
     }
 
     /// Limite di banda della scrittura (0 = nessuno).
@@ -174,7 +150,7 @@ impl SnapshotWriter {
         w.write_all(&(a.data().len() as u64).to_le_bytes())?;
         w.write_all(a.data())?;
         self.pos += 89 + a.data().len() as u64;
-        if self.pos - self.synced >= self.chunk {
+        if self.pos - self.synced >= SNAP_CHUNK {
             self.chunk()?;
         }
         Ok(())
@@ -263,8 +239,6 @@ pub struct Durable {
     /// Write e sync_data del gruppo che lo contiene (uguali per tutti i blocchi del gruppo).
     pub write: std::time::Duration,
     pub sync: std::time::Duration,
-    /// Blocchi scritti con la stessa write e lo stesso sync_data.
-    pub group: usize,
     /// Fine del sync_data (ms unix): solo misura.
     pub at_ms: u64,
 }
@@ -286,9 +260,8 @@ impl JournalThread {
         use std::sync::atomic::Ordering::Relaxed;
         let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(queue);
         let (dtx, done) = std::sync::mpsc::channel();
-        let (hold, discard) = (std::sync::Arc::new(Default::default()), std::sync::Arc::new(Default::default()));
-        let (h, d): (std::sync::Arc<std::sync::atomic::AtomicBool>, std::sync::Arc<std::sync::atomic::AtomicBool>) =
-            (std::sync::Arc::clone(&hold), std::sync::Arc::clone(&discard));
+        let (hold, discard) = (std::sync::Arc::<std::sync::atomic::AtomicBool>::default(), std::sync::Arc::<std::sync::atomic::AtomicBool>::default());
+        let (h, d) = (hold.clone(), discard.clone());
         let handle = std::thread::Builder::new()
             .name("centrifuga-journal".into())
             .spawn(move || {
@@ -318,7 +291,7 @@ impl JournalThread {
                             journal.end += buf.len() as u64;
                             let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
                             for (height, offset) in at {
-                                let _ = dtx.send(Ok(Durable { height, offset, write, sync, group: batch.len(), at_ms }));
+                                let _ = dtx.send(Ok(Durable { height, offset, write, sync, at_ms }));
                             }
                         }
                         Err(e) => {

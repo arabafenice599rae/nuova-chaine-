@@ -196,7 +196,7 @@ fn shadow_follows_closed_and_recreated_accounts() {
             assert_eq!(std::fs::read(da.join("snapshot.bin")).unwrap(), reference(&c, &format!("shadow_close_ref{i}")), "snapshot {i} uguale al sincrono");
         }
     }
-    assert_eq!(a.snapshot_counts(), (0, 2));
+    assert_eq!(counts(&a), (0, 2));
 }
 
 /// Divergenza simulata nello stato ombra: lo snapshot non viene scritto, l'errore è
@@ -222,7 +222,7 @@ fn diverged_shadow_does_not_write_and_reports() {
         let e = n.wait_snapshot().unwrap_err();
         assert!(e.contains(expected), "{case}: {e}");
         assert_eq!(std::fs::read(d.join("snapshot.bin")).unwrap(), before, "{case}: snapshot precedente intatto");
-        assert_eq!(n.snapshot_counts().1, 1, "{case}: scritto solo il primo");
+        assert_eq!(counts(&n).1, 1, "{case}: scritto solo il primo");
         drop(n);
         let n = Node::open(cfg, op()).unwrap(); // snapshot 5 + journal
         assert_eq!(n.chain.height, 10);
@@ -246,12 +246,12 @@ fn slow_shadow_skips_snapshots_without_slowing_the_node() {
         n.tick(t0 + i * 100).unwrap();
         slowest = slowest.max(node_ms(&n, t));
     }
-    let sync: u64 = n.sync_log.iter().map(|s| s.2 as u64).sum();
+    let sync: u64 = n.block_log.iter().map(|b| b.sync_us as u64).sum();
     let elapsed = started.elapsed().saturating_sub(std::time::Duration::from_micros(sync));
     assert!(elapsed < std::time::Duration::from_secs(3), "il nodo non ha aspettato l'ombra: {elapsed:?} (senza i sync_data)");
     assert!(slowest < 200, "tick più lento {slowest} ms");
     assert!(n.shadow_for_test().unwrap().lost(), "ombra persa");
-    let (skipped, _) = n.snapshot_counts();
+    let (skipped, _) = counts(&n);
     assert!(skipped >= 1, "snapshot saltati: {skipped}");
     let e = n.wait_snapshot().unwrap_err();
     assert!(e.contains("lost"), "{e}");
@@ -290,7 +290,7 @@ fn write_interrupted_when_queue_fills_then_shadow_recovers() {
     }
     n.wait_snapshot().unwrap();
     assert!(slowest < 200, "il nodo non ha aspettato la scrittura: {slowest} ms");
-    let (skipped, written) = n.snapshot_counts();
+    let (skipped, written) = counts(&n);
     assert!(skipped >= 1, "snapshot interrotti o saltati: {skipped}");
     assert!(written >= 1);
     assert!(!n.shadow_for_test().unwrap().lost(), "l'ombra non si è persa: ha recuperato");
@@ -301,6 +301,12 @@ fn write_interrupted_when_queue_fills_then_shadow_recovers() {
 /// Tempo di un blocco sul nodo, senza il sync_data del journal (dipende dal disco, non
 /// dall'ombra: sulla CI supera a volte i 100 ms).
 fn node_ms(n: &Node, t: std::time::Instant) -> u128 {
-    let sync = std::time::Duration::from_micros(n.sync_log.last().map_or(0, |s| s.2 as u64));
+    let sync = std::time::Duration::from_micros(n.block_log.back().map_or(0, |b| b.sync_us as u64));
     t.elapsed().saturating_sub(sync).as_millis()
+}
+
+/// Snapshot saltati e scritti dallo stato ombra.
+fn counts(n: &Node) -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    n.shadow_stats().map_or((0, 0), |s| (s.skipped.load(Relaxed), s.written.load(Relaxed)))
 }

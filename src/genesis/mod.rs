@@ -94,15 +94,13 @@ pub struct NodeConfig {
     /// Banda massima della scrittura dello snapshot (MB/s, 0 = nessun limite).
     #[serde(default = "default_snapshot_mb_s")]
     pub snapshot_mb_s: u64,
-    /// Blocchi di scrittura dello snapshot (KB): mai più di ~2 blocchi in sospeso.
-    #[serde(default = "default_snapshot_chunk_kb")]
-    pub snapshot_chunk_kb: u64,
     /// Blocchi eseguiti e non ancora durevoli, al massimo (coda verso il thread del
     /// journal): dopo un crash le letture degli account tornano indietro al più di tanti.
     #[serde(default = "default_journal_queue_blocks")]
     pub journal_queue_blocks: usize,
-    /// Priorità I/O idle per la scrittura dello snapshot (thread dell'ombra).
-    #[serde(default)]
+    /// Priorità I/O idle per la scrittura dello snapshot (thread dell'ombra), default sì:
+    /// a 10M account dimezza i picchi del sync_data del journal durante lo snapshot.
+    #[serde(default = "yes")]
     pub snapshot_io_idle: bool,
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
@@ -327,12 +325,12 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
 }
 
-fn default_journal_queue_blocks() -> usize {
-    10
+fn yes() -> bool {
+    true
 }
 
-fn default_snapshot_chunk_kb() -> u64 {
-    8192
+fn default_journal_queue_blocks() -> usize {
+    10
 }
 
 fn default_snapshot_mb_s() -> u64 {

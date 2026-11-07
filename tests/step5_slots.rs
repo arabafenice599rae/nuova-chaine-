@@ -60,11 +60,12 @@ fn three_ways(c: &Config, op: &Keypair, prefix: &[Block], last: &Block, name: &s
     nc.node.data_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rules_{name}"));
     let _ = std::fs::remove_dir_all(&nc.node.data_dir);
     std::fs::create_dir_all(&nc.node.data_dir).unwrap();
-    let mut j = Journal::open(&nc.node.data_dir.join("journal.bin"), |_, _| Ok(())).unwrap();
+    let j = Journal::open(&nc.node.data_dir.join("journal.bin"), |_, _| Ok(())).unwrap();
+    let j = centrifuga::ledger::JournalThread::start(j, 1).unwrap();
     for b in prefix.iter().chain([last]) {
-        j.append(b).unwrap();
+        j.send(b.header.height, b.encode()).unwrap();
     }
-    drop(j);
+    drop(j); // scrive tutto e chiude
     let journal = Node::open(nc, Keypair::try_from(op.to_bytes().as_slice()).unwrap()).map(|_| ());
     // 3. Replica (messaggi "solo header" dallo stream, regole del genesis).
     let mut rep = Replica::new(op.pubkey(), c.genesis.params().unwrap().rules);

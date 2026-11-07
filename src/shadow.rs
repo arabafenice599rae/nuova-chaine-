@@ -27,12 +27,11 @@ use crate::stream::{Accounts, Replica};
 /// Blocchi in coda al massimo verso il thread dell'ombra (~60 s a 100 ms per blocco).
 pub const QUEUE_BLOCKS: usize = 600;
 
-/// Scrittura dello snapshot sul disco: banda (MB/s, 0 = nessun limite), blocchi (byte),
-/// priorità I/O idle del thread dell'ombra.
+/// Scrittura dello snapshot sul disco: banda (MB/s, 0 = nessun limite) e priorità I/O
+/// idle del thread dell'ombra.
 #[derive(Clone, Copy, Debug)]
 pub struct WriteIo {
     pub mb_s: u64,
-    pub chunk: u64,
     pub idle: bool,
 }
 
@@ -177,18 +176,12 @@ impl Drop for Shadow {
     }
 }
 
-/// Priorità bassa (nice 10) al thread corrente, senza dipendenze: `renice` sul tid.
+/// Priorità bassa (nice 10) al thread corrente: su Linux `setpriority` sul tid vale per
+/// il solo thread.
 fn lower_priority() {
-    let tid = std::fs::read_link("/proc/thread-self").ok().and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()));
-    if let Some(tid) = tid {
-        let ok = std::process::Command::new("renice")
-            .args(["-n", "10", "-p", &tid])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if !ok.is_ok_and(|s| s.success()) {
-            eprintln!("shadow: could not lower the thread priority (renice)");
-        }
+    // SAFETY: syscall senza puntatori.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 10) } != 0 {
+        eprintln!("shadow: could not lower the thread priority");
     }
 }
 
@@ -248,10 +241,8 @@ impl State {
         let tmp = self.dir.join("snapshot.tmp");
         let result = (|| -> Result<bool, String> {
             let e = |e: std::io::Error| format!("snapshot {height}: {e}");
-            let mut w = crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64)
-                .map_err(e)?
-                .with_rate(self.io.mb_s)
-                .with_chunk(self.io.chunk);
+            let mut w =
+                crate::ledger::SnapshotWriter::create(&tmp, height, genesis_hash, state_hash, r.accounts().len() as u64).map_err(e)?.with_rate(self.io.mb_s);
             let mut lt = crate::exec::state_hash::LtState::empty();
             for (i, (k, a)) in r.accounts().iter().enumerate() {
                 w.push(k, a).map_err(e)?;
