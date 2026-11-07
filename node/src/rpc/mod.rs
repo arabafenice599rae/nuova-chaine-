@@ -53,6 +53,7 @@ pub struct Gateway {
     pub log: Option<Arc<Mutex<File>>>,
     /// Indexer dello storico (URL http): il nodo gli inoltra le richieste sullo storico.
     pub indexer: Option<String>,
+    pub ingress: Arc<crate::ingress::Ingress>,
 }
 
 /// POST JSON-RPC verso l'indexer (http://host:porta), sui thread di rete: il thread del
@@ -141,7 +142,12 @@ impl Gateway {
         let method = method.to_string();
         let params = req.get("params").cloned().unwrap_or(json!([]));
         let m = method.clone();
-        let resp = match self.query(move |n| methods::call(n, &m, &params, peer, arrived)).await {
+        let res = if method == "sendTransaction" {
+            self.send_transaction(params, peer, arrived).await
+        } else {
+            self.query(move |n| methods::call(n, &m, &params)).await
+        };
+        let resp = match res {
             Some(Ok(v)) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
             Some(Err(e)) => {
                 // `data: null` manda in errore web3.js: si omette se vuoto.
@@ -155,6 +161,30 @@ impl Gateway {
         };
         self.log("http", &method, &outcome(&resp));
         resp
+    }
+}
+
+impl Gateway {
+    /// Preflight sul thread del nodo (se chiesto), poi seq e verifica nel pool
+    /// dell'ingresso: il thread del nodo non decodifica né verifica firme.
+    async fn send_transaction(&self, p: Value, peer: Option<IpAddr>, arrived: Instant) -> Option<Result<Value, methods::RpcError>> {
+        use crate::ingress::Rejected;
+        if p[1]["skipPreflight"].as_bool() != Some(true) {
+            let q = p.clone();
+            if let Err(e) = self.query(move |n| methods::call(n, "sendTransaction", &q)).await? {
+                return Some(Err(e));
+            }
+        }
+        let message: String = match self.ingress.send(peer, crate::ingress::Item::Rpc(p), arrived).await.ok()? {
+            Ok((_, sig)) => return Some(Ok(json!(sig.to_string()))),
+            Err(Rejected::Invalid(m)) => return Some(Err(methods::RpcError { code: -32602, message: m, data: Value::Null })),
+            Err(Rejected::BadSignature) => "Transaction signature verification failure".into(),
+            Err(Rejected::BlockhashNotFound) => "Blockhash not found".into(),
+            Err(Rejected::RateLimited) => "per-IP send limit exceeded, retry".into(),
+            Err(Rejected::TooManyPending) => "too many pending txs for this payer, retry".into(),
+            Err(Rejected::QueueFull) => "node busy: ingress queue full, retry".to_string(),
+        };
+        Some(Err(methods::RpcError { code: -32003, message, data: Value::Null }))
     }
 }
 

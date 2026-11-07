@@ -48,11 +48,11 @@ fn produce(n: &mut Node, t0: u64, i: u64) -> Signature {
 }
 
 fn rpc(n: &mut Node, method: &str) -> serde_json::Value {
-    centrifuga::rpc::methods::call(n, method, &json!([]), None, std::time::Instant::now()).unwrap()
+    centrifuga::rpc::methods::call(n, method, &json!([])).unwrap()
 }
 
 fn status(n: &mut Node, s: &Signature) -> serde_json::Value {
-    centrifuga::rpc::methods::call(n, "getSignatureStatuses", &json!([[s.to_string()]]), None, std::time::Instant::now()).unwrap()["value"][0].clone()
+    centrifuga::rpc::methods::call(n, "getSignatureStatuses", &json!([[s.to_string()]])).unwrap()["value"][0].clone()
 }
 
 #[test]

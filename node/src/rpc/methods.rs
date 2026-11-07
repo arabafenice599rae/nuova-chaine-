@@ -95,7 +95,7 @@ fn decode(s: &str, enc: Option<&str>) -> Result<Vec<u8>, RpcError> {
     }
 }
 
-fn decode_tx(p: &Value) -> Result<VersionedTransaction, RpcError> {
+pub fn decode_tx(p: &Value) -> Result<VersionedTransaction, RpcError> {
     let bytes = decode(&arg::<String>(p, 0)?, cfg(p, 1)["encoding"].as_str())?;
     let tx: VersionedTransaction = wincode::deserialize(&bytes).map_err(|e| invalid(format!("tx: {e}")))?;
     tx.sanitize().map_err(|e| invalid(format!("tx: {e}")))?;
@@ -199,7 +199,7 @@ pub fn transaction(r: &TxRecord, c: &Value) -> Value {
     out
 }
 
-pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr>, arrived: std::time::Instant) -> R {
+pub fn call(n: &mut Node, method: &str, p: &Value) -> R {
     // Altezza e blockhash pubblici: l'ultimo blocco durevole, qualunque commitment. Le
     // letture degli account vedono lo stato eseguito (al massimo `journal_queue_blocks` blocchi avanti).
     let height = n.durable_height;
@@ -286,30 +286,19 @@ pub fn call(n: &mut Node, method: &str, p: &Value, peer: Option<std::net::IpAddr
             }
             ctx(n, v)
         }
+        // Sul thread del nodo solo il preflight (serve lo stato); decodifica, firme e coda
+        // le fa il pool dell'ingresso (`Gateway::send_transaction`).
         "sendTransaction" => {
             let tx = decode_tx(p)?;
-            if cfg(p, 1)["skipPreflight"].as_bool() != Some(true) {
-                let fail = |data: Value, msg: String| RpcError { code: -32002, message: format!("Transaction simulation failed: {msg}"), data };
-                if let Err(e) = n.chain.check(&tx) {
-                    return Err(fail(json!({"err": e, "logs": [], "accounts": null, "unitsConsumed": 0}), e.to_string()));
-                }
-                let sim = simulate(n, tx.clone());
-                if !sim["err"].is_null() {
-                    return Err(fail(sim.clone(), sim["err"].to_string()));
-                }
+            let fail = |data: Value, msg: String| RpcError { code: -32002, message: format!("Transaction simulation failed: {msg}"), data };
+            if let Err(e) = n.chain.check(&tx) {
+                return Err(fail(json!({"err": e, "logs": [], "accounts": null, "unitsConsumed": 0}), e.to_string()));
             }
-            let s = tx.signatures[0];
-            use crate::ingress::Rejected;
-            let message = match n.ingress.submit(peer, vec![tx]).remove(0) {
-                Ok(_) => {
-                    n.arrivals.insert(s, arrived);
-                    return Ok(json!(s.to_string()));
-                }
-                Err(Rejected::BadSignature) => "Transaction signature verification failure",
-                Err(Rejected::RateLimited) => "per-IP send limit exceeded, retry",
-                Err(Rejected::TooManyPending) => "too many pending txs for this payer, retry",
-            };
-            return Err(RpcError { code: -32003, message: message.into(), data: Value::Null });
+            let sim = simulate(n, tx);
+            if !sim["err"].is_null() {
+                return Err(fail(sim.clone(), sim["err"].to_string()));
+            }
+            Value::Null
         }
         "getSignatureStatuses" => {
             // Finestra dei blockhash; con searchTransactionHistory il gateway completa i

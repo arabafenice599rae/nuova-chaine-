@@ -17,6 +17,8 @@ stream_catchup_blocks = 36000   # riconnessione con from_height: delta fino a 1 
 stream_catchup_bytes = 134217728 # ...e fino a 128 MB in RAM: vale il primo limite raggiunto
 ingress_tps_per_ip = 50
 ingress_pending_per_payer = 64
+ingress_workers = 0             # thread di verifica delle tx in arrivo (0 = core - 2, almeno 1)
+ingress_queue = 65536           # tx in attesa di verifica, al massimo (oltre: errore al client)
 rpc_recent_txs = 20000          # tx recenti in RAM per getTransaction; lo storico è dell'indexer
 # indexer_rpc = "http://127.0.0.1:8903"   # storico: getSignaturesForAddress e tx vecchie
 

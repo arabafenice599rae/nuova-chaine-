@@ -4,7 +4,6 @@
 //! le stesse risposte del nodo, anche dopo riavvii, arresti a metà e conservazione.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use centrifuga::genesis::{Config, IndexerConfig, LAMPORTS_PER_CNFA, Prefund, transfer_tx};
 use centrifuga::indexer::{self, Indexer};
@@ -19,7 +18,7 @@ use solana_signer::Signer;
 const EXAMPLE: &str = include_str!("../centrifuga.example.toml");
 
 fn rpc(n: &mut Node, m: &str, p: Value) -> Result<Value, methods::RpcError> {
-    call(n, m, &p, None, Instant::now())
+    call(n, m, &p)
 }
 
 struct Run {

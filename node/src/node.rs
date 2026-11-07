@@ -116,7 +116,9 @@ impl Node {
         if chain.height < snap_height {
             return Err("journal shorter than the snapshot".into());
         }
-        let limits = Limits { tps_per_ip: cfg.node.ingress_tps_per_ip, pending_per_payer: cfg.node.ingress_pending_per_payer };
+        let c = &cfg.node;
+        let limits =
+            Limits { tps_per_ip: c.ingress_tps_per_ip, pending_per_payer: c.ingress_pending_per_payer, workers: c.ingress_workers, queue: c.ingress_queue };
         let (durable_height, durable_hash) = (chain.height, chain.last_hash);
         let journal = JournalThread::start(journal, cfg.node.journal_queue_blocks.max(1))?;
         let mut n = Node {
@@ -145,6 +147,7 @@ impl Node {
             dir,
             keypair,
         };
+        n.ingress.set_blockhashes(n.chain.recent_blockhashes());
         if n.cfg.node.snapshot_every > 0 {
             n.start_shadow()?;
         }
@@ -176,10 +179,17 @@ impl Node {
             self.publish_one()?; // backpressure: il disco è indietro di tutta la coda
         }
         let waited = started.elapsed();
-        let txs = self.ingress.drain(self.cfg.node.max_block_txs);
+        let mut txs = vec![];
+        for (tx, at) in self.ingress.drain(self.cfg.node.max_block_txs) {
+            if let Some(at) = at {
+                self.arrivals.insert(tx.signatures[0], at);
+            }
+            txs.push(tx);
+        }
         let height = self.chain.height + self.gap(now_ms);
         self.last_tick_ms = Some(now_ms);
         let ex = self.chain.produce_at(height, txs, now_ms, &self.keypair);
+        self.ingress.set_blockhashes(self.chain.recent_blockhashes());
         let delta = Arc::new(crate::stream::block_delta(self, &ex));
         self.last_delta = Some((height, delta.clone()));
         if let Some(s) = self.shadow.as_mut() {
@@ -475,15 +485,12 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
     } else {
         None
     };
-    let running = Running {
-        gateway: Gateway { queries: qtx.clone(), events: events.clone(), log, indexer: running_indexer },
-        stream: crate::stream::Stream {
-            queries: qtx,
-            blocks: blocks.clone(),
-            max_wait: Duration::from_millis(cfg.genesis.slot_ms * cfg.node.stream_max_lag_blocks as u64),
-        },
-        cfg: cfg.clone(),
+    let stream = crate::stream::Stream {
+        queries: qtx.clone(),
+        blocks: blocks.clone(),
+        max_wait: Duration::from_millis(cfg.genesis.slot_ms * cfg.node.stream_max_lag_blocks as u64),
     };
+    let (gw_events, cfg2) = (events.clone(), cfg.clone());
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     // Nome del thread: visibile in top -H e nelle misure di CPU per thread.
     let spawned = std::thread::Builder::new().name("centrifuga-node".into()).spawn(move || {
@@ -493,7 +500,7 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
             Err(e) => return drop(ready_tx.send(Err(e))),
         };
         println!("{} ({}): height {}, hash {}", node.cfg.genesis.chain_name, node.cfg.genesis.chain_id, node.chain.height, node.chain.last_hash);
-        let _ = ready_tx.send(Ok(()));
+        let _ = ready_tx.send(Ok(node.ingress.clone()));
         let res = node.serve(qrx, move |_n, ex, delta| {
             let _ = events.send(Arc::new(BlockEvent::new(ex)));
             // Il messaggio dello stream si costruisce solo se qualcuno ascolta.
@@ -520,8 +527,9 @@ pub fn start(cfg: Config, keypair: Keypair) -> Result<Running, String> {
         }
     });
     spawned.map_err(|e| format!("node thread: {e}"))?;
-    ready_rx.recv().map_err(|e| e.to_string())??;
-    Ok(running)
+    let ingress = ready_rx.recv().map_err(|e| e.to_string())??;
+    let gateway = Gateway { queries: qtx, events: gw_events, log, indexer: running_indexer, ingress };
+    Ok(Running { gateway, stream, cfg: cfg2 })
 }
 
 impl Running {

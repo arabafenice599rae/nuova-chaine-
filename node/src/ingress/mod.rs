@@ -1,10 +1,18 @@
-//! Ingresso transazioni: verifica firme in batch, numero progressivo (seq), coda FIFO.
-//! La priority fee non cambia l'ordine: si esegue rigorosamente per seq.
+//! Ingresso transazioni. All'arrivo ogni tx riceve un numero progressivo (seq, contatore
+//! atomico), prima di qualunque verifica: è il seq a decidere l'ordine di esecuzione. Un
+//! pool di thread decodifica, verifica le firme e il blockhash; il nodo preleva solo il
+//! prefisso contiguo di seq già verificati, e una tx scartata lascia un buco che si salta.
+//! La priority fee non cambia l'ordine.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
+
+use solana_hash::Hash;
+use tokio::sync::oneshot;
 
 use ed25519_dalek::{Signature as DSig, VerifyingKey};
 use solana_address::Address;
@@ -54,6 +62,9 @@ pub struct Limits {
     pub tps_per_ip: u32,
     /// Transazioni in coda non ancora eseguite per pagatore.
     pub pending_per_payer: u32,
+    /// Thread di verifica (0 = core - 2, almeno 1) e tx in attesa di verifica, al massimo.
+    pub workers: usize,
+    pub queue: usize,
 }
 
 /// Chi invia: l'IP per HTTP (e domani per QUIC); `None` = locale, senza limite di frequenza.
@@ -64,27 +75,57 @@ pub enum Rejected {
     BadSignature,
     RateLimited,
     TooManyPending,
+    QueueFull,
+    BlockhashNotFound,
+    /// Tx non decodificabile (codifica, formato, sanitize).
+    Invalid(String),
 }
 
+/// Una tx da verificare: già decodificata, oppure i parametri di sendTransaction.
+pub enum Item {
+    Tx(VersionedTransaction),
+    Rpc(serde_json::Value),
+}
+
+type Reply = oneshot::Sender<Result<(u64, solana_signature::Signature), Rejected>>;
+
+/// Seq già verificati: `None` = scartato (buco da saltare).
 #[derive(Default)]
-struct Queue {
-    next_seq: u64,
-    txs: VecDeque<(u64, VersionedTransaction)>,
+struct Ready {
+    next: u64,
+    slots: BTreeMap<u64, Option<(VersionedTransaction, Option<Instant>)>>,
     pending: HashMap<Address, u32>,
 }
 
-/// Coda di arrivo. seq e inserimento avvengono sotto lo stesso lock,
-/// quindi l'ordine della coda coincide con l'ordine di seq.
+struct Shared {
+    ready: Mutex<Ready>,
+    /// Blockhash validi per il prossimo blocco (li aggiorna il nodo a ogni blocco).
+    hashes: RwLock<HashSet<Hash>>,
+    pending_per_payer: u32,
+}
+
 pub struct Ingress {
     limits: Limits,
-    queue: Mutex<Queue>,
+    seq: AtomicU64,
+    jobs: SyncSender<(u64, Item, Instant, Reply)>,
+    shared: Arc<Shared>,
     /// IP -> (gettoni, ultimo aggiornamento): token bucket.
     buckets: Mutex<HashMap<IpAddr, (f64, Instant)>>,
 }
 
 impl Ingress {
     pub fn new(limits: Limits) -> Ingress {
-        Ingress { limits, queue: Mutex::default(), buckets: Mutex::default() }
+        let ready = Mutex::new(Ready::default());
+        let shared = Arc::new(Shared { ready, hashes: Default::default(), pending_per_payer: limits.pending_per_payer });
+        let (jobs, rx) = std::sync::mpsc::sync_channel(limits.queue.max(1));
+        let rx = Arc::new(Mutex::new(rx));
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let n = if limits.workers > 0 { limits.workers } else { cores.saturating_sub(2).max(1) };
+        for i in 0..n {
+            let (rx, sh) = (rx.clone(), shared.clone());
+            std::thread::Builder::new().name(format!("centrifuga-verify-{i}")).spawn(move || worker(&rx, &sh)).expect("verify thread");
+        }
+        Ingress { limits, seq: AtomicU64::new(0), jobs, shared, buckets: Mutex::default() }
     }
 
     /// Un gettone per tx; ricarica `tps_per_ip` al secondo, massimo 2 secondi di scorta.
@@ -100,51 +141,107 @@ impl Ingress {
         (*tokens >= 1.0).then(|| *tokens -= 1.0).is_some()
     }
 
-    /// Verifica (firme in batch) e accoda; restituisce il seq assegnato a ogni tx.
+    /// Seq all'arrivo, poi in coda verso il pool; la risposta arriva quando la tx è
+    /// verificata (o scartata). Con la coda piena il seq diventa subito un buco.
+    pub fn send(&self, sender: Sender, item: Item, arrived: Instant) -> oneshot::Receiver<Result<(u64, solana_signature::Signature), Rejected>> {
+        let (tx, rx) = oneshot::channel();
+        if sender.is_some_and(|ip| !self.take_token(ip)) {
+            let _ = tx.send(Err(Rejected::RateLimited));
+            return rx;
+        }
+        let seq = self.seq.fetch_add(1, Relaxed);
+        if let Err(TrySendError::Full((seq, _, _, tx)) | TrySendError::Disconnected((seq, _, _, tx))) = self.jobs.try_send((seq, item, arrived, tx)) {
+            self.shared.ready.lock().unwrap().slots.insert(seq, None);
+            let _ = tx.send(Err(Rejected::QueueFull));
+        }
+        rx
+    }
+
+    /// Accoda e aspetta la verifica; restituisce il seq assegnato a ogni tx.
     pub fn submit(&self, sender: Sender, txs: Vec<VersionedTransaction>) -> Vec<Result<u64, Rejected>> {
-        let ok = verify_signatures(&txs);
-        let mut q = self.queue.lock().unwrap();
-        txs.into_iter()
-            .zip(ok)
-            .map(|(tx, ok)| {
-                if !ok {
-                    return Err(Rejected::BadSignature);
-                }
-                if sender.is_some_and(|ip| !self.take_token(ip)) {
-                    return Err(Rejected::RateLimited);
-                }
-                let payer = tx.message.static_account_keys()[0];
-                let n = q.pending.entry(payer).or_default();
-                if *n >= self.limits.pending_per_payer {
-                    return Err(Rejected::TooManyPending);
-                }
-                *n += 1;
-                let seq = q.next_seq;
-                q.next_seq += 1;
-                q.txs.push_back((seq, tx));
-                Ok(seq)
-            })
-            .collect()
+        let rxs: Vec<_> = txs.into_iter().map(|t| self.send(sender, Item::Tx(t), Instant::now())).collect();
+        rxs.into_iter().map(|rx| rx.blocking_recv().unwrap_or(Err(Rejected::QueueFull)).map(|(seq, _)| seq)).collect()
     }
 
+    /// Blockhash validi per il prossimo blocco: le tx con un altro blockhash si scartano
+    /// (salvo le durable nonce, che il nodo controlla all'esecuzione).
+    pub fn set_blockhashes(&self, hashes: HashSet<Hash>) {
+        *self.shared.hashes.write().unwrap() = hashes;
+    }
+
+    /// Nessuna tx verificata pronta per il prossimo blocco.
     pub fn is_empty(&self) -> bool {
-        self.queue.lock().unwrap().txs.is_empty()
+        let r = self.shared.ready.lock().unwrap();
+        r.slots.first_key_value().is_none_or(|(k, _)| *k != r.next)
     }
 
-    /// Preleva fino a `max` transazioni in ordine di seq.
-    pub fn drain(&self, max: usize) -> Vec<VersionedTransaction> {
-        let mut q = self.queue.lock().unwrap();
-        let n = max.min(q.txs.len());
-        let out: Vec<_> = q.txs.drain(..n).map(|(_, tx)| tx).collect();
-        for tx in &out {
+    /// Preleva fino a `max` tx del prefisso contiguo di seq verificati (i buchi si saltano),
+    /// con l'istante di arrivo per quelle arrivate via RPC.
+    pub fn drain(&self, max: usize) -> Vec<(VersionedTransaction, Option<Instant>)> {
+        let mut guard = self.shared.ready.lock().unwrap();
+        let r = &mut *guard;
+        let mut out = vec![];
+        while out.len() < max && r.slots.first_key_value().is_some_and(|(k, _)| *k == r.next) {
+            r.next += 1;
+            let Some((tx, at)) = r.slots.pop_first().unwrap().1 else { continue };
             let payer = tx.message.static_account_keys()[0];
-            if let Some(c) = q.pending.get_mut(&payer) {
+            if let Some(c) = r.pending.get_mut(&payer) {
                 *c -= 1;
                 if *c == 0 {
-                    q.pending.remove(&payer);
+                    r.pending.remove(&payer);
                 }
             }
+            out.push((tx, at));
         }
         out
     }
+}
+
+/// Thread di verifica: decodifica, firme, blockhash, limite per pagatore; scrive l'esito
+/// nello slot del suo seq e risponde a chi ha inviato.
+fn worker(rx: &Mutex<Receiver<(u64, Item, Instant, Reply)>>, sh: &Shared) {
+    loop {
+        let Ok((seq, item, arrived, reply)) = rx.lock().unwrap().recv() else { return };
+        let (tx, arrived) = match item {
+            Item::Tx(t) => (Ok(t), None),
+            Item::Rpc(p) => (crate::rpc::methods::decode_tx(&p).map_err(|e| Rejected::Invalid(e.message)), Some(arrived)),
+        };
+        let res = tx.and_then(|tx| {
+            if !verify_signatures(std::slice::from_ref(&tx))[0] {
+                return Err(Rejected::BadSignature);
+            }
+            if !sh.hashes.read().unwrap().contains(tx.message.recent_blockhash()) && !maybe_nonce(&tx) {
+                return Err(Rejected::BlockhashNotFound);
+            }
+            Ok(tx)
+        });
+        let mut r = sh.ready.lock().unwrap();
+        let res = res.and_then(|tx| {
+            let n = r.pending.entry(tx.message.static_account_keys()[0]).or_default();
+            if *n >= sh.pending_per_payer {
+                return Err(Rejected::TooManyPending);
+            }
+            *n += 1;
+            Ok(tx)
+        });
+        let out = res.map(|tx| {
+            let sig = tx.signatures[0];
+            r.slots.insert(seq, Some((tx, arrived)));
+            (seq, sig)
+        });
+        if out.is_err() {
+            r.slots.insert(seq, None);
+        }
+        drop(r);
+        let _ = reply.send(out);
+    }
+}
+
+/// Prima istruzione AdvanceNonceAccount: forse una durable nonce (la verifica completa
+/// la fa il nodo all'esecuzione).
+fn maybe_nonce(tx: &VersionedTransaction) -> bool {
+    let (m, keys) = (&tx.message, tx.message.static_account_keys());
+    m.instructions()
+        .first()
+        .is_some_and(|ix| keys.get(ix.program_id_index as usize) == Some(&solana_sdk_ids::system_program::id()) && ix.data.starts_with(&[4, 0, 0, 0]))
 }
