@@ -222,7 +222,8 @@ async fn slow_client_is_dropped_without_slowing_blocks() {
 #[test]
 fn ingress_limits_per_ip_and_per_payer() {
     use centrifuga::ingress::{Ingress, Limits};
-    let ing = Ingress::new(Limits { tps_per_ip: 5, pending_per_payer: 3 });
+    let ing = Ingress::new(Limits { tps_per_ip: 5, pending_per_payer: 3, workers: 1, queue: 64 });
+    ing.set_blockhashes([Hash::default()].into());
     let (a, b) = (Keypair::new(), Keypair::new());
     let tx = |k: &Keypair, i: u64| transfer_tx(k, &Address::new_unique(), i, Hash::default());
     let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();

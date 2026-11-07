@@ -105,6 +105,12 @@ pub struct NodeConfig {
     /// Ingresso: tx al secondo per IP e tx in coda per pagatore.
     pub ingress_tps_per_ip: u32,
     pub ingress_pending_per_payer: u32,
+    /// Thread che verificano le tx in arrivo (0 = core - 2, almeno 1) e tx in attesa di
+    /// verifica, al massimo (oltre: errore al client).
+    #[serde(default)]
+    pub ingress_workers: usize,
+    #[serde(default = "default_ingress_queue")]
+    pub ingress_queue: usize,
     /// Tx recenti in RAM per getTransaction (gli stati coprono sempre la finestra dei blockhash).
     #[serde(default = "default_rpc_recent_txs")]
     pub rpc_recent_txs: usize,
@@ -323,6 +329,10 @@ pub fn transfer_tx(from: &Keypair, to: &Address, lamports: u64, blockhash: Hash)
     let ix = solana_system_interface::instruction::transfer(&from.pubkey(), to, lamports);
     let msg = Message::new_with_blockhash(&[ix], Some(&from.pubkey()), &blockhash);
     VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[from]).expect("sign")
+}
+
+fn default_ingress_queue() -> usize {
+    65_536
 }
 
 fn yes() -> bool {

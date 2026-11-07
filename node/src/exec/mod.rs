@@ -312,6 +312,12 @@ impl Chain {
         Ok(())
     }
 
+    /// Blockhash validi per il prossimo blocco.
+    pub fn recent_blockhashes(&self) -> HashSet<Hash> {
+        let n = self.params.blockhash_window as u64;
+        self.hashes.iter().filter(|(_, h)| *h + n > self.height).map(|(k, _)| *k).collect()
+    }
+
     /// Controlli del nodo prima dell'esecuzione: duplicati, blockhash, durable nonce.
     /// Per il prossimo blocco possibile (altezza + 1); in un blocco: `check_at`.
     pub fn check(&self, tx: &VersionedTransaction) -> Result<Nonce, TransactionError> {

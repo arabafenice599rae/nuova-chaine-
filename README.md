@@ -65,7 +65,9 @@ Un blocco il cui hash di stato non corrisponde alla riesecuzione è un'altra pro
   fino all'altezza h + N (`blockhash_window`, default 300 slot = 30 s), oppure la tx
   usa un durable nonce valido. Anti-duplicati: le firme restano note per lo stesso
   intervallo. `getLatestBlockhash` riporta `lastValidBlockHeight` = h + N.
-- Ordine: FIFO rigoroso per seq di arrivo. La priority fee **non** cambia l'ordine.
+- Ordine: FIFO rigoroso per seq di arrivo. Il seq si assegna all'arrivo, prima di
+  qualunque verifica: è lui a decidere l'ordine di esecuzione, non chi finisce prima la
+  verifica. La priority fee **non** cambia l'ordine.
 
 ## Persistenza
 
@@ -306,14 +308,19 @@ L'API principale per bot e repliche (`node/src/stream/`): WebSocket su `stream_a
 ## Ingresso delle transazioni
 
 Per ora HTTP (`sendTransaction`); QUIC si valuterà con i numeri qui sotto.
-`ingress::Ingress::submit(mittente, txs)` è l'interfaccia comune: verifica le firme in
-batch, applica i limiti e assegna il seq. Un futuro server QUIC chiamerà la stessa.
+`ingress::Ingress::send` (e `submit`, che aspetta l'esito) è l'interfaccia comune: applica
+il limite per IP, assegna il seq e passa la tx a un pool di `ingress_workers` thread
+(default: core − 2) che la decodificano, verificano firme e blockhash. Il thread del nodo
+preleva solo il prefisso contiguo di seq già verificati; una tx scartata lascia un buco
+che si salta subito. Un futuro server QUIC chiamerà la stessa interfaccia.
 
 - Limite per IP: `ingress_tps_per_ip` tx/s (burst di 2 s). Dietro un proxy locale
   vale l'IP in `X-Forwarded-For`.
 - Limite per pagatore: al massimo `ingress_pending_per_payer` tx in coda non ancora
   eseguite (un pagatore non può riempire la coda FIFO).
-- Rifiuti: errore `-32003` con il motivo.
+- Coda di verifica limitata (`ingress_queue`, default 65.536 tx): oltre, errore `-32003`
+  "ingress queue full, retry".
+- Rifiuti: errore `-32003` con il motivo (`-32602` per una tx non decodificabile).
 
 Latenza da invio a blocco firmato (`tests/web3/latency.mjs`, 200 tx ad arrivo casuale):
 **totale** = `sendTransaction` con preflight → notifica `signatureSubscribe`, emessa
@@ -383,7 +390,7 @@ node/              crate centrifuga-node: tutto ciò che gira nel nodo
   src/rpc/           gateway JSON-RPC + WebSocket per i wallet
   src/exec/          esecuzione blocchi, finestra blockhash, nonce, StateHasher
   src/ledger/        blocco, journal, snapshot
-  src/ingress/       verifica firme batch, seq, coda FIFO
+  src/ingress/       seq all'arrivo, pool di verifica (firme, blockhash), riordino FIFO
   src/genesis/       config TOML, stato iniziale, verifiche
   src/archive/       formato dei record delle tx (indice RPC e archivio dell'indexer)
 src/               crate centrifuga: CLI e strumenti
