@@ -200,12 +200,18 @@ impl Node {
         self.journal.send(height, ex.block.encode())?;
         // Tempo sul thread del nodo per questo blocco (attesa per coda piena compresa).
         self.last_tick_us = started.elapsed().as_micros() as u64;
-        if self.last_tick_us > 100_000 && self.slow_blocks.len() < 64 {
+        if self.last_tick_us > 50_000 {
             let mut ph = ex.phases;
             ph.queue = waited;
             ph.cpu_wait = run_delay().saturating_sub(delay0);
             ph.other = Duration::from_micros(self.last_tick_us).saturating_sub(ph.queue + ph.cpu_wait + ph.exec + ph.hash + ph.sign);
-            self.slow_blocks.push((height, self.last_tick_us, ph));
+            let ms = |d: Duration| d.as_secs_f64() * 1e3;
+            let (q, c, e, h, s, o) = (ms(ph.queue), ms(ph.cpu_wait), ms(ph.exec), ms(ph.hash), ms(ph.sign), ms(ph.other));
+            let total = self.last_tick_us / 1000;
+            eprintln!("slow block {height}: {total} ms = journal queue full {q:.0} + cpu wait {c:.0} + exec {e:.0} + hash {h:.0} + sign {s:.0} + other {o:.0}");
+            if self.last_tick_us > 100_000 && self.slow_blocks.len() < 64 {
+                self.slow_blocks.push((height, self.last_tick_us, ph));
+            }
         }
         self.pending.push_back(Pending { ex, delta, started: Instant::now(), executed_ms: crate::node::now_ms() });
         Ok(height)
