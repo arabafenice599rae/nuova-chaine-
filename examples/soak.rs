@@ -2,7 +2,8 @@
 //!   cargo run --release --example soak -- <accounts> <tps> <minutes> [--rpc]
 //!   cargo run --release --example soak -- --reopen <dir>     (riavvio e riesecuzione)
 //! Carico: thread client firmano trasferimenti al ritmo richiesto e li consegnano
-//!   - senza --rpc: direttamente all'ingresso del nodo (3 thread). Misura il LIMITE DEL
+//!   - senza --rpc: direttamente all'ingresso del nodo (3 thread), una tx alla volta con
+//!     arrivi di Poisson; BURSTS=1: lotti da 50 (come nei run fino al 7/11/2026). Misura il LIMITE DEL
 //!     NODO, non il throughput di un utente: niente HTTP, JSON, base64.
 //!   - con --rpc: via HTTP/JSON-RPC `sendTransaction` (16 thread, una richiesta per tx),
 //!     come un client vero: è il numero end-to-end (client sulla stessa macchina).
@@ -223,6 +224,35 @@ fn main() {
                 .name(format!("soak-client-{w}"))
                 .spawn(move || {
                     let (start, mut done, mut k) = (Instant::now(), 0u64, w);
+                    // Default: una tx alla volta a intervalli esponenziali (arrivi di Poisson,
+                    // nessuna raffica); campione ~1 tx ogni 1.000. BURSTS=1: lotti da 50.
+                    if !via_rpc && !std::env::var("BURSTS").is_ok_and(|v| v == "1") {
+                        let (mut rng, mut next) = (0x9E37_79B9_7F4A_7C15u64 ^ (w + 1).wrapping_mul(0xD1B5_4A32_D192_ED03), 0f64);
+                        while !stop.load(Ordering::Relaxed) {
+                            rng ^= rng << 13;
+                            rng ^= rng >> 7;
+                            rng ^= rng << 17;
+                            let u = ((rng >> 11) as f64 + 1.0) / (1u64 << 53) as f64;
+                            next += -u.ln() / rate;
+                            let wait = next - start.elapsed().as_secs_f64();
+                            if wait > 0.0 {
+                                std::thread::sleep(Duration::from_secs_f64(wait));
+                            }
+                            k += signers_n;
+                            let from = &senders[((k / signers_n) % senders.len() as u64) as usize];
+                            let tx = transfer_tx(from, &addr(k.wrapping_mul(0x9E37_79B9_7F4A_7C15) % n.max(1)), 1 + k % 100_000, *bh.lock().unwrap());
+                            let sig = tx.signatures[0];
+                            if k % 1_000 < signers_n {
+                                samples.lock().unwrap().push((sig, height.load(Ordering::Relaxed)));
+                                pending.lock().unwrap().push((sig, Instant::now()));
+                                sent_ms.lock().unwrap().insert(sig, node::now_ms());
+                            }
+                            let ok = ingress.submit(None, vec![tx]).iter().filter(|r| r.is_ok()).count() as u64;
+                            sent.fetch_add(1, Ordering::Relaxed);
+                            accepted.fetch_add(ok, Ordering::Relaxed);
+                        }
+                        return;
+                    }
                     while !stop.load(Ordering::Relaxed) {
                         // Ritmo: tx dovute finora, a lotti da 50.
                         let due = (start.elapsed().as_secs_f64() * rate) as u64;
@@ -480,6 +510,27 @@ fn main() {
         pct(&mut d, 0.5),
         pct(&mut d, 0.99)
     );
+    // Istogramma invio -> eseguito a passi di 10 ms; fase dell'invio rispetto all'ultimo
+    // blocco eseguito; blocchi eseguiti tra l'invio e quello che include la tx.
+    {
+        let mut execs: Vec<u64> = times.values().map(|t| t.0).collect();
+        execs.sort_unstable();
+        let (mut hist, mut phase, mut skip) = ([0u32; 31], [0u32; 31], [0u32; 6]);
+        for (s, slot, _) in &seen {
+            if let (Some(t0), Some((ex, _, _))) = (sm.get(s), times.get(slot)) {
+                hist[(ex.saturating_sub(*t0) / 10).min(30) as usize] += 1;
+                let (i, j) = (execs.partition_point(|e| e <= t0), execs.partition_point(|e| e < ex));
+                if i > 0 {
+                    phase[((t0 - execs[i - 1]) / 10).min(30) as usize] += 1;
+                }
+                skip[j.saturating_sub(i).min(5)] += 1;
+            }
+        }
+        let fmt = |h: &[u32]| h.iter().enumerate().map(|(k, c)| format!("{}:{c}", k * 10)).collect::<Vec<_>>().join(" ");
+        say!("istogramma invio -> eseguito (inizio del passo da 10 ms: campioni; 300 = oltre): {}", fmt(&hist));
+        say!("fase dell'invio dopo l'ultimo blocco eseguito (passi da 10 ms): {}", fmt(&phase));
+        say!("blocchi eseguiti tra l'invio e il blocco della tx (0 = il primo utile): {:?}", skip);
+    }
     let mut dl: Vec<f64> = rt.block_on(gw.query(|n: &mut Node| n.block_log.iter().map(|b| b.queued_us as f64 / 1e3).collect::<Vec<_>>())).unwrap();
     say!(
         "dall'accodamento al journal alla durabilità: p50 {:.1} / p99 {:.1} / max {:.1} ms (il blocco sopra è il tempo sul thread del nodo, attesa per coda piena compresa)",
